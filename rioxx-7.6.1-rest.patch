@@ -1,0 +1,2759 @@
+diff --git a/dspace-oai/src/main/java/org/dspace/xoai/app/XOAI.java b/dspace-oai/src/main/java/org/dspace/xoai/app/XOAI.java
+index 4f842b8e94..25cc1ee365 100644
+--- a/dspace-oai/src/main/java/org/dspace/xoai/app/XOAI.java
++++ b/dspace-oai/src/main/java/org/dspace/xoai/app/XOAI.java
+@@ -450,6 +450,16 @@ public class XOAI {
+             doc.addField("item.communities", "com_" + com.getHandle().replace("/", "_"));
+         }
+ 
++        boolean hasBitstream = false;
++
++        for (Bundle b : item.getBundles("ORIGINAL")) {
++            if (b.getBitstreams().size() > 0) {
++                hasBitstream = true;
++            }
++        }
++
++        doc.addField("item.hasbitstream", hasBitstream);
++
+         List<MetadataValue> allData = itemService.getMetadata(item, Item.ANY, Item.ANY, Item.ANY, Item.ANY);
+         for (MetadataValue dc : allData) {
+             MetadataField field = dc.getMetadataField();
+diff --git a/dspace-oai/src/main/java/org/dspace/xoai/filter/ItemsWithBitstreamFilter.java b/dspace-oai/src/main/java/org/dspace/xoai/filter/ItemsWithBitstreamFilter.java
+new file mode 100644
+index 0000000000..3599c5b9e1
+--- /dev/null
++++ b/dspace-oai/src/main/java/org/dspace/xoai/filter/ItemsWithBitstreamFilter.java
+@@ -0,0 +1,57 @@
++/**
++ * The contents of this file are subject to the license and copyright
++ * detailed in the LICENSE and NOTICE files at the root of the source
++ * tree and available online at
++ *
++ * http://www.dspace.org/license/
++ */
++package org.dspace.xoai.filter;
++
++import java.sql.SQLException;
++
++import org.apache.log4j.LogManager;
++import org.apache.log4j.Logger;
++import org.dspace.content.Bundle;
++import org.dspace.content.Item;
++import org.dspace.handle.factory.HandleServiceFactory;
++import org.dspace.handle.service.HandleService;
++import org.dspace.xoai.data.DSpaceItem;
++import org.dspace.xoai.filter.results.SolrFilterResult;
++
++
++/**
++ * Created by Philip Vissenaekens (philip at atmire dot com)
++ * Date: 21/04/15
++ * Time: 15:18
++ */
++public class ItemsWithBitstreamFilter extends DSpaceFilter {
++
++    private static Logger log = LogManager.getLogger(ItemsWithBitstreamFilter.class);
++
++    private static final HandleService handleService
++            = HandleServiceFactory.getInstance().getHandleService();
++
++    @Override
++    public SolrFilterResult buildSolrQuery() {
++        return new SolrFilterResult("item.hasbitstream:true");
++    }
++
++    @Override
++    public boolean isShown(DSpaceItem item) {
++        try {
++            String handle = DSpaceItem.parseHandle(item.getIdentifier());
++            if (handle == null) {
++                return false;
++            }
++            Item dspaceItem = (Item) handleService.resolveToObject(context, handle);
++            for (Bundle b : dspaceItem.getBundles("ORIGINAL")) {
++                if (b.getBitstreams().size() > 0) {
++                    return true;
++                }
++            }
++        } catch (SQLException e) {
++            log.error(e.getMessage(), e);
++        }
++        return false;
++    }
++}
+diff --git a/dspace-oai/src/main/java/org/dspace/xoai/util/ItemUtils.java b/dspace-oai/src/main/java/org/dspace/xoai/util/ItemUtils.java
+index b329835813..bb9ed25987 100644
+--- a/dspace-oai/src/main/java/org/dspace/xoai/util/ItemUtils.java
++++ b/dspace-oai/src/main/java/org/dspace/xoai/util/ItemUtils.java
+@@ -11,6 +11,8 @@ import java.io.ByteArrayOutputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.sql.SQLException;
++import java.text.SimpleDateFormat;
++import java.util.Date;
+ import java.util.List;
+ 
+ import com.lyncode.xoai.dataprovider.xml.xoai.Element;
+@@ -21,6 +23,7 @@ import org.apache.logging.log4j.Logger;
+ import org.dspace.app.util.factory.UtilServiceFactory;
+ import org.dspace.app.util.service.MetadataExposureService;
+ import org.dspace.authorize.AuthorizeException;
++import org.dspace.authorize.ResourcePolicy;
+ import org.dspace.authorize.factory.AuthorizeServiceFactory;
+ import org.dspace.authorize.service.AuthorizeService;
+ import org.dspace.content.Bitstream;
+@@ -114,23 +117,21 @@ public class ItemUtils {
+                     log.error("Null bitstream found, check item uuid: " + item.getID());
+                     break;
+                 }
++                boolean primary = false;
++                // Check if current bitstream is in original bundle + 1 of the 2 following
++                // Bitstream = primary bitstream in bundle -> true
++                // No primary bitstream found in bundle-> only the first one gets flagged as "primary"
++                if (b.getName() != null && b.getName().equals("ORIGINAL") && (b.getPrimaryBitstream() != null
++                        && b.getPrimaryBitstream().getID() == bit.getID()
++                        || b.getPrimaryBitstream() == null && bit.getID() == bits.get(0).getID())) {
++                    primary = true;
++                }
++
+                 Element bitstream = create("bitstream");
+                 bitstreams.getElement().add(bitstream);
+-                String url = "";
+-                String bsName = bit.getName();
+-                String sid = String.valueOf(bit.getSequenceID());
++
+                 String baseUrl = configurationService.getProperty("oai.bitstream.baseUrl");
+-                String handle = null;
+-                // get handle of parent Item of this bitstream, if there
+-                // is one:
+-                List<Bundle> bn = bit.getBundles();
+-                if (!bn.isEmpty()) {
+-                    List<Item> bi = bn.get(0).getItems();
+-                    if (!bi.isEmpty()) {
+-                        handle = bi.get(0).getHandle();
+-                    }
+-                }
+-                url = baseUrl + "/bitstreams/" + bit.getID().toString() + "/download";
++                String url = baseUrl + "/bitstreams/" + bit.getID().toString() + "/download";
+ 
+                 String cks = bit.getChecksum();
+                 String cka = bit.getChecksumAlgorithm();
+@@ -147,18 +148,65 @@ public class ItemUtils {
+                 if (description != null) {
+                     bitstream.getField().add(createValue("description", description));
+                 }
++                // Add bitstream embargo information (READ policy present, for Anonymous group with a start date)
++                addResourcePolicyInformation(context, bit, bitstream);
++
+                 bitstream.getField().add(createValue("format", bit.getFormat(context).getMIMEType()));
+                 bitstream.getField().add(createValue("size", "" + bit.getSizeBytes()));
+                 bitstream.getField().add(createValue("url", url));
+                 bitstream.getField().add(createValue("checksum", cks));
+                 bitstream.getField().add(createValue("checksumAlgorithm", cka));
+                 bitstream.getField().add(createValue("sid", bit.getSequenceID() + ""));
++                // Add primary bitstream field to allow locating easily the primary bitstream information
++                bitstream.getField().add(createValue("primary", primary + ""));
+             }
+         }
+ 
+         return bundles;
+     }
+ 
++    /**
++     * This method will add metadata information about associated resource policies for a give bitstream.
++     * It will parse of relevant policies and add metadata information
++     * @param context
++     * @param bitstream the bitstream object
++     * @param bitstreamEl the bitstream metadata object to add resource policy information to
++     * @throws SQLException
++     */
++    private static void addResourcePolicyInformation(Context context, Bitstream bitstream, Element bitstreamEl)
++            throws SQLException {
++        // Pre-filter access policies by DSO (bitstream) and Action (READ)
++        List<ResourcePolicy> policies = authorizeService.getPoliciesActionFilter(context, bitstream, Constants.READ);
++
++        // Create resourcePolicies container
++        Element resourcePolicies = create("resourcePolicies");
++
++        for (ResourcePolicy policy : policies) {
++            String groupName = policy.getGroup() != null ? policy.getGroup().getName() : null;
++            String user = policy.getEPerson() != null ? policy.getEPerson().getName() : null;
++            String action = Constants.actionText[policy.getAction()];
++            Date startDate = policy.getStartDate();
++            Date endDate = policy.getEndDate();
++
++            SimpleDateFormat formatter = new SimpleDateFormat("yyyy-MM-dd");
++
++            Element resourcePolicyEl = create("resourcePolicy");
++            resourcePolicyEl.getField().add(createValue("group", groupName));
++            resourcePolicyEl.getField().add(createValue("user", user));
++            resourcePolicyEl.getField().add(createValue("action", action));
++            if (startDate != null) {
++                resourcePolicyEl.getField().add(createValue("start-date", formatter.format(startDate)));
++            }
++            if (endDate != null) {
++                resourcePolicyEl.getField().add(createValue("end-date", formatter.format(endDate)));
++            }
++            // Add resourcePolicy to list of resourcePolicies
++            resourcePolicies.getElement().add(resourcePolicyEl);
++        }
++        // Add list of resource policies to the corresponding Bitstream XML Element
++        bitstreamEl.getElement().add(resourcePolicies);
++    }
++
+     private static Element createLicenseElement(Context context, Item item)
+             throws SQLException, AuthorizeException, IOException {
+         Element license = create("license");
+@@ -178,7 +226,7 @@ public class ItemUtils {
+                     license.getField().add(createValue("bin", Base64Utils.encode(out.toString())));
+                 } else {
+                     log.info("Missing READ rights for license bitstream. Did not include license bitstream for item: "
+-                             + item.getID() + ".");
++                            + item.getID() + ".");
+                 }
+             }
+         }
+diff --git a/dspace-oai/src/test/java/org/dspace/xoai/tests/stylesheets/RioxxXslTest.java b/dspace-oai/src/test/java/org/dspace/xoai/tests/stylesheets/RioxxXslTest.java
+new file mode 100644
+index 0000000000..74dfaf2902
+--- /dev/null
++++ b/dspace-oai/src/test/java/org/dspace/xoai/tests/stylesheets/RioxxXslTest.java
+@@ -0,0 +1,35 @@
++/**
++ * The contents of this file are subject to the license and copyright
++ * detailed in the LICENSE and NOTICE files at the root of the source
++ * tree and available online at
++ *
++ * http://www.dspace.org/license/
++ */
++package org.dspace.xoai.tests.stylesheets;
++
++import static org.dspace.xoai.tests.support.XmlMatcherBuilder.xml;
++import static org.hamcrest.MatcherAssert.assertThat;
++import static org.hamcrest.core.Is.is;
++import static org.hamcrest.core.IsEqual.equalTo;
++
++import org.dspace.xoai.tests.support.XmlMatcherBuilder;
++import org.junit.Test;
++
++public class RioxxXslTest extends AbstractXSLTest {
++    @Test
++    public void rioxxCanTransformInput() throws Exception {
++        String result = apply("rioxx.xsl").to(resource("xoai-rioxx-test.xml"));
++
++        assertThat(result, is(rioxx().withXPath("//dc:title", equalTo("The Intercorrelation Between " +
++                "Executive Function, Physics Problem Solving, Mathematical, and Matrix Reasoning Skills: " +
++                "Reflections from a Small-Scale Experiment"))));
++    }
++
++    private XmlMatcherBuilder rioxx() {
++        return xml()
++                .withNamespace("rioxx", "http://www.rioxx.net/schema/v3.0/rioxx/")
++                .withNamespace("rioxxterms", "http://docs.rioxx.net/schema/v3.0/rioxxterms/")
++                .withNamespace("dcterms", "http://purl.org/dc/terms/")
++                .withNamespace("dc", "http://purl.org/dc/elements/1.1/");
++    }
++}
+diff --git a/dspace-oai/src/test/resources/rioxx-test-invalid.xml b/dspace-oai/src/test/resources/rioxx-test-invalid.xml
+new file mode 100644
+index 0000000000..c8daf1a28d
+--- /dev/null
++++ b/dspace-oai/src/test/resources/rioxx-test-invalid.xml
+@@ -0,0 +1,89 @@
++<?xml version='1.0' encoding='UTF-8'?><!--
++
++    The contents of this file are subject to the license and copyright
++    detailed in the LICENSE and NOTICE files at the root of the source
++    tree and available online at
++
++    http://www.dspace.org/license/
++
++-->
++<rioxx xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.rioxx.net/schema/v3.0/rioxx/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:rioxxterms="http://docs.rioxx.net/schema/v3.0/rioxxterms/">
++    <dc:description>Data on Secchi disc depth (the depth at which a standard white disc lowered into the water just becomes invisible to a surface observer) show that water clarity in the North Sea declined during the 20th century, with likely consequences for marine primary production. However, the causes of this trend remain unknown. Here we analyse the hypothesis that changes in the North Sea's wave climate were largely responsible by causing an increase in the concentrations of suspended particulate matter (SPM) in the water column through the resuspension of seabed sediments. First, we analysed the broad-scale statistical relationships between SPM and bed shear stress due to waves and tides. We used hindcasts of wave and current data to construct a space–time dataset of bed shear stress between 1997 and 2017 across the northwest European Continental Shelf and compared the results with satellite-derived SPM concentrations. Bed shear stress was found to drive most of the inter-annual variation in SPM in the hydrographically mixed waters of the central and southern North Sea. We then used a long-term wave reanalysis to construct a time series of bed shear stress from 1900 to 2010. This shows that bed shear stress increased significantly across much of the shelf during this period, with increases of over 20 % in the southeastern North Sea. An increase in bed shear stress of this magnitude would have resulted in a large reduction in water clarity. Wave-driven processes are rarely included in projections of climate change impacts on marine ecosystems, but our analysis indicates that this should be reconsidered for shelf sea regions.</dc:description>
++
++    <dc:language>en</dc:language>
++
++    <rioxxterms:publisher>
++        <rioxxterms:name>European Geosciences Union</rioxxterms:name>
++        <rioxxterms:id>https://isni.org/isni/0000000110927289</rioxxterms:id>
++    </rioxxterms:publisher>
++
++    <dc:source>1812-0792</dc:source>
++
++    <dc:title>Increasing turbidity in the North Sea during the 20th century due to changing wave climate</dc:title>
++
++    <dcterms:dateAccepted>2019-10-02</dcterms:dateAccepted>
++
++    <rioxxterms:creator
++            first-named-author="true">
++        <rioxxterms:name>Wilson, Robert J.</rioxxterms:name>
++        <rioxxterms:id>https://orcid.org/0000-0002-0592-366X</rioxxterms:id>
++    </rioxxterms:creator>
++
++    <rioxxterms:creator>
++        <rioxxterms:name>Heath, Michael R.</rioxxterms:name>
++        <rioxxterms:id>https://orcid.org/0000-0001-6602-3107</rioxxterms:id>
++        <rioxxterms:id> https://viaf.org/viaf/15147423189944882613</rioxxterms:id>
++    </rioxxterms:creator>
++
++    <rioxxterms:publication_date>2019-12-09</rioxxterms:publication_date>
++
++    <rioxxterms:record_public_release_date>2019-10-15</rioxxterms:record_public_release_date>
++
++    <dc:type>https://purl.org/coar/resource_type/c_2df8fbb1</dc:type>
++
++    <rioxxterms:grant
++            funder_name="Australian Research Council"
++            funder_id="https://ror.org/05mmh0f86">
++        DP190101507
++    </rioxxterms:grant>
++
++    <rioxxterms:grant
++            funder_name="John Templeton Foundation"
++            funder_id="https://ror.org/035tnyy05">
++        61387
++    </rioxxterms:grant>
++
++    <dc:relation
++            rel="item"
++            type="application/pdf"
++            coar_type="https://purl.org/coar/resource_type/c_6501"
++            coar_version="https://purl.org/coar/version/c_ab4af688f83e57aa"
++            deposit_date="2019-12-11"
++            resource_exposed_date="2019-12-11"
++            access_rights_="https://purl.org/coar/access_right/c_abf2"
++            license_ref="https://creativecommons.org/licenses/by-nc-nd/4.0/">
++        https://strathprints.strath.ac.uk/70117/7/Wilson_Heath_OS2019_Increasing_turbidity_in_the_North_Sea_during_the_20th_century.pdf
++    </dc:relation>
++
++    <!-- Other expressions (or 'instances') - publisher version -->
++    <rioxxterms:ext_relation
++            rel="cite-as"
++            coar_type="https://purl.org/coar/resource_type/c_6501"
++            coar_version="https://purl.org/coar/version/c_970fb48d4fbd8a85">
++        https://doi.org/10.1007/s11229-020-02724-x
++    </rioxxterms:ext_relation>
++
++    <!-- related  dataset -->
++    <rioxxterms:ext_relation
++            rel="cite-as"
++            coar_type="https://purl.org/coar/resource_type/c_ddb1">
++        https://doi.org/10.15129/5d28213e-8f9f-402a-b550-fc588518cb8b
++    </rioxxterms:ext_relation >
++
++    <!-- related software -->
++    <rioxxterms:ext_relation
++            rel="cite-as"
++            coar_type="https://purl.org/coar/resource_type/QH80-2R4E">
++        https://doi.org/10.5281/zenodo.3478185
++    </rioxxterms:ext_relation>
++</rioxx>
+diff --git a/dspace-oai/src/test/resources/rioxx-test-valid.xml b/dspace-oai/src/test/resources/rioxx-test-valid.xml
+new file mode 100644
+index 0000000000..74ffd43eb6
+--- /dev/null
++++ b/dspace-oai/src/test/resources/rioxx-test-valid.xml
+@@ -0,0 +1,92 @@
++<?xml version='1.0' encoding='UTF-8'?>
++<!--
++
++    The contents of this file are subject to the license and copyright
++    detailed in the LICENSE and NOTICE files at the root of the source
++    tree and available online at
++
++    http://www.dspace.org/license/
++
++-->
++<rioxx xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.rioxx.net/schema/v3.0/rioxx/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:rioxxterms="http://docs.rioxx.net/schema/v3.0/rioxxterms/">
++    <dc:description>Data on Secchi disc depth (the depth at which a standard white disc lowered into the water just becomes invisible to a surface observer) show that water clarity in the North Sea declined during the 20th century, with likely consequences for marine primary production. However, the causes of this trend remain unknown. Here we analyse the hypothesis that changes in the North Sea's wave climate were largely responsible by causing an increase in the concentrations of suspended particulate matter (SPM) in the water column through the resuspension of seabed sediments. First, we analysed the broad-scale statistical relationships between SPM and bed shear stress due to waves and tides. We used hindcasts of wave and current data to construct a space–time dataset of bed shear stress between 1997 and 2017 across the northwest European Continental Shelf and compared the results with satellite-derived SPM concentrations. Bed shear stress was found to drive most of the inter-annual variation in SPM in the hydrographically mixed waters of the central and southern North Sea. We then used a long-term wave reanalysis to construct a time series of bed shear stress from 1900 to 2010. This shows that bed shear stress increased significantly across much of the shelf during this period, with increases of over 20 % in the southeastern North Sea. An increase in bed shear stress of this magnitude would have resulted in a large reduction in water clarity. Wave-driven processes are rarely included in projections of climate change impacts on marine ecosystems, but our analysis indicates that this should be reconsidered for shelf sea regions.</dc:description>
++
++    <dc:language>en</dc:language>
++
++    <rioxxterms:publisher>
++        <rioxxterms:name>European Geosciences Union</rioxxterms:name>
++        <rioxxterms:id>https://isni.org/isni/0000000110927289</rioxxterms:id>
++    </rioxxterms:publisher>
++
++    <dc:source>1812-0792</dc:source>
++
++    <dc:title>Increasing turbidity in the North Sea during the 20th century due to changing wave climate</dc:title>
++
++    <dcterms:dateAccepted>2019-10-02</dcterms:dateAccepted>
++
++    <rioxxterms:creator
++            first-named-author="true">
++        <rioxxterms:name>Wilson, Robert J.</rioxxterms:name>
++        <rioxxterms:id>https://orcid.org/0000-0002-0592-366X</rioxxterms:id>
++    </rioxxterms:creator>
++
++    <rioxxterms:creator>
++        <rioxxterms:name>Heath, Michael R.</rioxxterms:name>
++        <rioxxterms:id>https://orcid.org/0000-0001-6602-3107</rioxxterms:id>
++        <rioxxterms:id> https://viaf.org/viaf/15147423189944882613</rioxxterms:id>
++    </rioxxterms:creator>
++
++    <rioxxterms:publication_date>2019-12-09</rioxxterms:publication_date>
++
++    <rioxxterms:record_public_release_date>2019-10-15</rioxxterms:record_public_release_date>
++
++    <dc:type>https://purl.org/coar/resource_type/c_2df8fbb1</dc:type>
++
++    <rioxxterms:grant
++            funder_name="Australian Research Council"
++            funder_id="https://ror.org/05mmh0f86">
++        DP190101507
++    </rioxxterms:grant>
++
++    <rioxxterms:grant
++            funder_name="John Templeton Foundation"
++            funder_id="https://ror.org/035tnyy05">
++        61387
++    </rioxxterms:grant>
++
++    <dc:identifier>https://strathprints.strath.ac.uk/70117/</dc:identifier>
++
++    <dc:relation
++            rel="item"
++            type="application/pdf"
++            coar_type="https://purl.org/coar/resource_type/c_6501"
++            coar_version="https://purl.org/coar/version/c_ab4af688f83e57aa"
++            deposit_date="2019-12-11"
++            resource_exposed_date="2019-12-11"
++            access_rights_="https://purl.org/coar/access_right/c_abf2"
++            license_ref="https://creativecommons.org/licenses/by-nc-nd/4.0/">
++        https://strathprints.strath.ac.uk/70117/7/Wilson_Heath_OS2019_Increasing_turbidity_in_the_North_Sea_during_the_20th_century.pdf
++    </dc:relation>
++
++    <!-- Other expressions (or 'instances') - publisher version -->
++    <rioxxterms:ext_relation
++            rel="cite-as"
++            coar_type="https://purl.org/coar/resource_type/c_6501"
++            coar_version="https://purl.org/coar/version/c_970fb48d4fbd8a85">
++        https://doi.org/10.1007/s11229-020-02724-x
++    </rioxxterms:ext_relation>
++
++    <!-- related  dataset -->
++    <rioxxterms:ext_relation
++            rel="cite-as"
++            coar_type="https://purl.org/coar/resource_type/c_ddb1">
++        https://doi.org/10.15129/5d28213e-8f9f-402a-b550-fc588518cb8b
++    </rioxxterms:ext_relation >
++
++    <!-- related software -->
++    <rioxxterms:ext_relation
++            rel="cite-as"
++            coar_type="https://purl.org/coar/resource_type/QH80-2R4E">
++        https://doi.org/10.5281/zenodo.3478185
++    </rioxxterms:ext_relation>
++</rioxx>
+diff --git a/dspace-oai/src/test/resources/xoai-rioxx-test.xml b/dspace-oai/src/test/resources/xoai-rioxx-test.xml
+new file mode 100644
+index 0000000000..33c2c3d101
+--- /dev/null
++++ b/dspace-oai/src/test/resources/xoai-rioxx-test.xml
+@@ -0,0 +1,217 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++
++    The contents of this file are subject to the license and copyright
++    detailed in the LICENSE and NOTICE files at the root of the source
++    tree and available online at
++
++    http://www.dspace.org/license/
++
++-->
++<metadata
++        xmlns="http://www.lyncode.com/xoai"
++        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.lyncode.com/xoai http://www.lyncode.com/xsd/xoai.xsd">
++    <element name="dspace">
++        <element name="entity">
++            <element name="type">
++                <element name="none">
++                    <field name="value">Publication</field>
++                </element>
++            </element>
++        </element>
++    </element>
++    <element name="dcterms">
++        <element name="dateAccepted">
++            <element name="none">
++                <field name="value">2023-11-07</field>
++            </element>
++        </element>
++    </element>
++    <element name="dc">
++        <element name="contributor">
++            <element name="author">
++                <element name="none">
++                    <field name="value">Tsigaridis, Konstantinos G.</field>
++                    <field name="authority">virtual::44</field>
++                    <field name="confidence">-1</field>
++                    <field name="value">Wang, Rui</field>
++                    <field name="authority">virtual::46</field>
++                    <field name="confidence">-1</field>
++                    <field name="value">Ellefson, Michelle R.</field>
++                    <field name="authority">virtual::47</field>
++                    <field name="confidence">-1</field>
++                </element>
++            </element>
++        </element>
++        <element name="date">
++            <element name="accessioned">
++                <element name="none">
++                    <field name="value">2023-11-07T11:34:10Z</field>
++                </element>
++            </element>
++            <element name="available">
++                <element name="none">
++                    <field name="value">2023-11-07T11:34:10Z</field>
++                </element>
++            </element>
++            <element name="issued">
++                <element name="none">
++                    <field name="value">2022-11-30</field>
++                </element>
++            </element>
++        </element>
++        <element name="identifier">
++            <element name="uri">
++                <element name="none">
++                    <field name="value">https://example.org/handle/1811/160</field>
++                </element>
++            </element>
++        </element>
++        <element name="language">
++            <element name="iso">
++                <element name="none">
++                    <field name="value">eng</field>
++                </element>
++            </element>
++        </element>
++        <element name="title">
++            <element name="none">
++                <field name="value">The Intercorrelation Between Executive Function, Physics Problem Solving, Mathematical, and Matrix Reasoning Skills: Reflections from a Small-Scale Experiment</field>
++            </element>
++        </element>
++        <element name="type">
++            <element name="none">
++                <field name="value">Article</field>
++            </element>
++        </element>
++    </element>
++    <element name="relation">
++        <element name="isAuthorOfPublication">
++            <element name="none">
++                <field name="value">a57363fa-f82e-4684-bd76-f7bc1e893603</field>
++                <field name="authority">virtual::44</field>
++                <field name="confidence">-1</field>
++                <field name="value">e00b3d0d-65e2-4c30-825d-1a4839845790</field>
++                <field name="authority">virtual::46</field>
++                <field name="confidence">-1</field>
++                <field name="value">bdd38a03-206d-4f9b-bafb-70e060ad176f</field>
++                <field name="authority">virtual::47</field>
++                <field name="confidence">-1</field>
++            </element>
++            <element name="latestForDiscovery">
++                <element name="none">
++                    <field name="value">a57363fa-f82e-4684-bd76-f7bc1e893603</field>
++                    <field name="authority">virtual::44</field>
++                    <field name="confidence">-1</field>
++                    <field name="value">e00b3d0d-65e2-4c30-825d-1a4839845790</field>
++                    <field name="authority">virtual::46</field>
++                    <field name="confidence">-1</field>
++                    <field name="value">bdd38a03-206d-4f9b-bafb-70e060ad176f</field>
++                    <field name="authority">virtual::47</field>
++                    <field name="confidence">-1</field>
++                </element>
++            </element>
++        </element>
++        <element name="isJournalOfPublication">
++            <element name="none">
++                <field name="value">05a400b1-ff0b-4e40-80cd-a7d1b712ace2</field>
++                <field name="authority">virtual::71</field>
++                <field name="confidence">-1</field>
++            </element>
++        </element>
++        <element name="isJournalIssueOfPublication">
++            <element name="none">
++                <field name="value">7524a0cf-3ea2-40c7-a265-d583425ed4d7</field>
++                <field name="authority">virtual::71</field>
++                <field name="confidence">-1</field>
++            </element>
++            <element name="latestForDiscovery">
++                <element name="none">
++                    <field name="value">7524a0cf-3ea2-40c7-a265-d583425ed4d7</field>
++                    <field name="authority">virtual::71</field>
++                    <field name="confidence">-1</field>
++                </element>
++            </element>
++        </element>
++    </element>
++    <element name="person">
++        <element name="identifier">
++            <element name="orcid">
++                <element name="none">
++                    <field name="value">0000-0003-0407-9767</field>
++                    <field name="authority">virtual::47</field>
++                    <field name="confidence">-1</field>
++                </element>
++            </element>
++        </element>
++    </element>
++    <element name="creativeworkseries">
++        <element name="issn">
++            <element name="none">
++                <field name="value">2634-9876</field>
++                <field name="authority">virtual::71</field>
++                <field name="confidence">-1</field>
++            </element>
++        </element>
++    </element>
++    <element name="bundles">
++        <element name="bundle">
++            <field name="name">ORIGINAL</field>
++            <element name="bitstreams">
++                <element name="bitstream">
++                    <field name="name">Tsigaridis et al., 2022.pdf</field>
++                    <field name="format">application/pdf</field>
++                    <field name="size">1554917</field>
++                    <field name="url">https://example.org/bitstreams/9121e795-0af3-4ff3-be2a-4b28418fb269/download</field>
++                    <field name="checksum">42d8cd076931e43e02d0af70a36d704e</field>
++                    <field name="checksumAlgorithm">MD5</field>
++                    <field name="sid">1</field>
++                    <field name="primary">true</field>
++                    <element name="resourcePolicies">
++                        <element name="resourcePolicy">
++                            <field name="group">Anonymous</field>
++                            <field name="user">Anonymous</field>
++                            <field name="action">READ</field>
++                        </element>
++                    </element>
++                </element>
++            </element>
++        </element>
++        <element name="bundle">
++            <field name="name">THUMBNAIL</field>
++            <element name="bitstreams">
++                <element name="bitstream">
++                    <field name="name">cerj_volume_9_thumbnail.jpg</field>
++                    <field name="format">image/jpeg</field>
++                    <field name="size">14513</field>
++                    <field name="url">https://example.org/bitstreams/16245937-10bb-46db-9817-683a5ebd8d63/download</field>
++                    <field name="checksum">8c39d691daa8e5f9d668668db7910cd6</field>
++                    <field name="checksumAlgorithm">MD5</field>
++                    <field name="sid">2</field>
++                    <field name="primary">false</field>
++                    <element name="resourcePolicies">
++                        <element name="resourcePolicy">
++                            <field name="group">Anonymous</field>
++                            <field name="user">Anonymous</field>
++                            <field name="action">READ</field>
++                        </element>
++                    </element>
++                </element>
++            </element>
++        </element>
++    </element>
++    <element name="others">
++        <field name="handle">1811/160</field>
++        <field name="identifier">oai:example.org:1811/160</field>
++        <field name="lastModifyDate">2023-12-13 13:07:56.51</field>
++        <element name="access-status">
++            <field name="value">open.access</field>
++        </element>
++    </element>
++    <element name="repository">
++        <field name="url">https://example.org</field>
++        <field name="name">Diamond DSpace (dev)</field>
++        <field name="mail">support@example.org</field>
++    </element>
++    <element name="license"/>
++</metadata>
+diff --git a/dspace/config/crosswalks/oai/metadataFormats/oai_openaire.xsl b/dspace/config/crosswalks/oai/metadataFormats/oai_openaire.xsl
+index 16c63c9c1a..c96305db16 100644
+--- a/dspace/config/crosswalks/oai/metadataFormats/oai_openaire.xsl
++++ b/dspace/config/crosswalks/oai/metadataFormats/oai_openaire.xsl
+@@ -883,7 +883,32 @@
+     <xsl:template match="doc:element[@name='bitstreams']/doc:element[@name='bitstream']" mode="oaire">
+         <oaire:file>
+             <xsl:attribute name="accessRightsURI">
+-                <xsl:call-template name="getRightsURI"/>
++                <!-- get the coar access rights at the individual file level -->
++                <!-- Look at resource policies to infer access level information, defaults to item-level status -->
++                <xsl:choose>
++                    <xsl:when test="doc:element[@name='resourcePolicies']/doc:element[doc:field[@name='action']/text()='READ' and doc:field[@name='group']/text()='Anonymous' and doc:field[@name='start-date']]">
++                        <xsl:call-template name="resolveRightsURI">
++                            <xsl:with-param name="field"
++                                            select="'embargo'"/>
++                        </xsl:call-template>
++                    </xsl:when>
++                    <xsl:when test="doc:element[@name='resourcePolicies']/doc:element[doc:field[@name='action']/text()='READ' and doc:field[@name='group']/text()='Anonymous' and not(doc:field[@name='start-date'])]">
++                        <xsl:call-template name="resolveRightsURI">
++                            <xsl:with-param name="field"
++                                            select="'open.access'"/>
++                        </xsl:call-template>
++                    </xsl:when>
++                    <xsl:when test="doc:element[@name='resourcePolicies']/doc:element[doc:field[@name='action']/text()='READ' and doc:field[@name='group']/text()='Administrator']">
++                        <xsl:call-template name="resolveRightsURI">
++                            <xsl:with-param name="field"
++                                            select="'restricted'"/>
++                        </xsl:call-template>
++                    </xsl:when>
++                    <xsl:otherwise>
++                        <!-- Default to item-level access status information -->
++                        <xsl:call-template name="getRightsURI"/>
++                    </xsl:otherwise>
++                </xsl:choose>
+          </xsl:attribute>
+             <xsl:attribute name="mimeType">
+             <xsl:value-of select="doc:field[@name='format']"/>
+diff --git a/dspace/config/crosswalks/oai/metadataFormats/rioxx.xsl b/dspace/config/crosswalks/oai/metadataFormats/rioxx.xsl
+new file mode 100644
+index 0000000000..20b5d22f2c
+--- /dev/null
++++ b/dspace/config/crosswalks/oai/metadataFormats/rioxx.xsl
+@@ -0,0 +1,1236 @@
++<?xml version="1.0" encoding="UTF-8" ?>
++<!--
++
++
++    The contents of this file are subject to the license and copyright
++    detailed in the LICENSE and NOTICE files at the root of the source
++    tree and available online at
++
++    http://www.dspace.org/license/
++	Developed by DSpace @ Lyncode <dspace@lyncode.com>
++
++ -->
++<xsl:stylesheet
++        xmlns:dc="http://purl.org/dc/elements/1.1/"
++        xmlns:dcterms="http://purl.org/dc/terms/"
++        xmlns:rioxxterms="http://docs.rioxx.net/schema/v3.0/rioxxterms/"
++        xmlns:xsl="http://www.w3.org/1999/XSL/Transform"
++        xmlns:doc="http://www.lyncode.com/xoai"
++        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++        version="1.0" xmlns:xls="http://www.w3.org/1999/XSL/Transform">
++    <xsl:output omit-xml-declaration="yes" method="xml" indent="yes"/>
++    <!-- First author global variable -->
++    <xsl:variable name="firstAuthor">
++        <xsl:call-template name="getFirstAuthor"/>
++    </xsl:variable>
++    <xsl:template match="/">
++        <rioxx xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++                xsi:schemaLocation="http://www.rioxx.net/schema/v3.0/rioxx/ http://www.rioxx.net/schema/v3.0/rioxx/rioxx.xsd">
++
++            <!-- RIOXX :: dc:coverage -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#dc:coverage -->
++            <xsl:apply-templates
++                    select="doc:metadata/doc:element[@name='dc']/doc:element[@name='coverage']" mode="dc"/>
++
++            <!-- RIOXX :: dc:description -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#dc:description -->
++            <xsl:apply-templates
++                    select="doc:metadata/doc:element[@name='dc']/doc:element[@name='description']/doc:element[@name='abstract']"
++                    mode="dc"/>
++
++            <!-- RIOXX :: dc:identifier
++               Persistent identifier for the resource. In repositories, this is typically a webpage which includes links to other related resources (splash page)
++            -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#dc:identifier -->
++            <xsl:apply-templates
++                    select="doc:metadata/doc:element[@name='dc']/doc:element[@name='identifier']/doc:element[@name='uri']"
++                    mode="dc"/>
++
++            <!-- RIOXX :: dc:language -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#dc:language -->
++            <xsl:apply-templates
++                    select="doc:metadata/doc:element[@name='dc']/doc:element[@name='language']/doc:element[@name='iso']"
++                    mode="dc"/>
++
++            <!-- RIOXX :: dc.relation -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#dc:relation -->
++            <!-- Declare the local repository PID for the corresponding resource, either a local DOI or a handle -->
++            <xsl:apply-templates
++                    select="doc:metadata/doc:element[@name='dc']/doc:element[@name='identifier']/doc:element[@name='uri']"
++                    mode="local_pid"/>
++
++            <!-- dc.relation: iterate through bundles (all files in bundle ORIGINAL) -->
++            <xsl:apply-templates
++                    select="doc:metadata/doc:element[@name='bundles']/doc:element[@name='bundle']" mode="dc"/>
++
++            <!-- RIOXX :: dc:source -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#dc:source -->
++            <xsl:variable name="isbn">
++                <xsl:call-template name="getISBN"/>
++            </xsl:variable>
++            <xsl:variable name="issn">
++                <xsl:call-template name="getISSN"/>
++            </xsl:variable>
++            <xsl:if test="not($isbn='') or not($issn='')">
++                <dc:source>
++                    <xsl:choose>
++                        <xsl:when test="not($isbn='')">
++                            <xsl:value-of select="$isbn"/>
++                        </xsl:when>
++                        <xsl:otherwise>
++                            <xsl:value-of select="$issn"/>
++                        </xsl:otherwise>
++                    </xsl:choose>
++                </dc:source>
++            </xsl:if>
++
++            <!-- RIOXX :: dc:subject -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#dc:source -->
++            <xsl:apply-templates
++                    select="doc:metadata/doc:element[@name='dc']/doc:element[@name='subject']" mode="dc"/>
++
++            <!-- RIOXX :: dc:title -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#dc:title -->
++            <xsl:apply-templates
++                    select="doc:metadata/doc:element[@name='dc']/doc:element[@name='title']" mode="dc"/>
++
++            <!-- RIOXX :: dc:type -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#dc:type -->
++            <xsl:apply-templates
++                    select="doc:metadata/doc:element[@name='dc']/doc:element[@name='type']" mode="dc"/>
++
++            <!-- RIOXX :: dcterms:dateAccepted -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#dcterms:dateAccepted -->
++            <xsl:variable name="acceptedDate">
++                <xsl:call-template name="getAcceptedDate"/>
++            </xsl:variable>
++            <xsl:if test="$acceptedDate!=''">
++                <dcterms:dateAccepted>
++                    <xls:value-of select="$acceptedDate"/>
++                </dcterms:dateAccepted>
++            </xsl:if>
++
++            <!-- RIOXX :: rioxxterms:contributor -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:contributor -->
++            <xsl:apply-templates
++                    select="doc:metadata/doc:element[@name='dc']/doc:element[@name='contributor']/doc:element[@name!='author']"
++                    mode="rioxx"/>
++
++            <!-- RIOXX :: rioxxterms:creator -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:creator -->
++            <xsl:apply-templates
++                    select="doc:metadata/doc:element[@name='dc']/doc:element[@name='contributor']/doc:element[@name='author']"
++                    mode="rioxx"/>
++
++            <!-- RIOXX :: rioxxterms:ext_relation -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:ext_relation -->
++            <!-- Include related published article if available -->
++            <xsl:if test="doc:metadata/doc:element[@name='rioxxterms']/doc:element[@name='versionofrecord']/doc:element/doc:field[@name='value']">
++                <rioxxterms:ext_relation
++                        rel="cite-as"
++                        coar_type="https://purl.org/coar/resource_type/c_6501"
++                        coar_version="https://purl.org/coar/version/c_970fb48d4fbd8a85">
++                    <xsl:value-of
++                            select="doc:metadata/doc:element[@name='rioxxterms']/doc:element[@name='versionofrecord']/doc:element/doc:field[@name='value']"/>
++                </rioxxterms:ext_relation>
++            </xsl:if>
++
++            <!-- RIOXX :: rioxxterms:grant -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:grant -->
++            <!-- AND -->
++            <!-- RIOXX :: rioxxterms:project -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:project -->
++            <!-- Construct rioxxterms:project and rioxxterms:grant from project and funding entities -->
++            <xsl:apply-templates
++                    select="doc:metadata/doc:element[@name='dc']/doc:element[@name='relation']" mode="rioxx"/>
++
++            <!-- RIOXX :: rioxxterms:publication_date -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:publication_date -->
++            <rioxxterms:publication_date>
++                <xsl:choose>
++                    <xsl:when
++                            test="doc:metadata/doc:element[@name='dc']/doc:element[@name='date']/doc:element[@name='issued']/doc:element/doc:field[@name='value']">
++                        <xls:value-of
++                                select="doc:metadata/doc:element[@name='dc']/doc:element[@name='date']/doc:element[@name='issued']/doc:element/doc:field[@name='value']"/>
++                    </xsl:when>
++                    <xsl:when
++                            test="doc:metadata/doc:element[@name='dcterms']/doc:element[@name='issuedOnline']/doc:element/doc:field[@name='value']">
++                        <xls:value-of
++                                select="doc:metadata/doc:element[@name='dcterms']/doc:element[@name='issuedOnline']/doc:element/doc:field[@name='value']"/>
++                    </xsl:when>
++                    <xsl:otherwise>
++                        <!-- Accessioned date in form 2023-07-26T14:53:19Z; we need YYYY-MM-dd -->
++                        <xsl:call-template name="getDateAccessioned"></xsl:call-template>
++                    </xsl:otherwise>
++                </xsl:choose>
++            </rioxxterms:publication_date>
++
++            <!-- RIOXX :: rioxxterms:publisher -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:publisher -->
++            <xsl:for-each
++                    select="doc:metadata/doc:element[@name='dc']/doc:element[@name='publisher']/doc:element/doc:field[@name='value']">
++                <dc:publisher>
++                    <rioxxterms:name>
++                        <xls:value-of select="."/>
++                    </rioxxterms:name>
++                </dc:publisher>
++            </xsl:for-each>
++
++            <!-- RIOXX :: rioxxterms:record_public_release_date -->
++            <!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:record_public_release_date -->
++            <rioxxterms:record_public_release_date>
++                <xsl:call-template name="getDateAccessioned"></xsl:call-template>
++            </rioxxterms:record_public_release_date>
++        </rioxx>
++    </xsl:template>
++
++    <!-- XML Element templates -->
++    <!-- dc.coverage -->
++    <!--  https://www.rioxx.net/profiles/v3-0-final/#dc:coverage -->
++    <xsl:template match="doc:element[@name='dc']/doc:element[@name='coverage']" mode="dc">
++        <!-- dc.coverage -->
++        <xsl:for-each select="./doc:element/doc:field[@name='value']">
++            <dc:coverage>
++                <xsl:value-of select="."/>
++            </dc:coverage>
++        </xsl:for-each>
++    </xsl:template>
++
++    <!-- dc.description -->
++    <!--  https://www.rioxx.net/profiles/v3-0-final/#dc:coverage -->
++    <xsl:template match="doc:element[@name='dc']/doc:element[@name='description']/doc:element[@name='abstract']"
++                  mode="dc">
++        <!-- dc.description -->
++        <xsl:for-each select="./doc:element/doc:field[@name='value']">
++            <dc:description>
++                <xsl:value-of select="."/>
++            </dc:description>
++        </xsl:for-each>
++    </xsl:template>
++
++    <!-- dc.identifier -->
++    <!--  https://www.rioxx.net/profiles/v3-0-final/#dc:identifier -->
++    <xsl:template match="doc:element[@name='dc']/doc:element[@name='identifier']/doc:element[@name='uri']"
++                  mode="dc">
++        <xsl:variable name="uris">
++            <xsl:for-each select="./doc:element/doc:field[@name='value']">
++                <xsl:variable name="isDOI">
++                    <xsl:call-template name="isDOI">
++                        <xsl:with-param name="field">
++                            <xsl:value-of select="text()"/>
++                        </xsl:with-param>
++                    </xsl:call-template>
++                </xsl:variable>
++                <xsl:variable name="isHandle">
++                    <xsl:call-template name="isHandle">
++                        <xsl:with-param name="field">
++                            <xsl:value-of select="text()"/>
++                        </xsl:with-param>
++                    </xsl:call-template>
++                </xsl:variable>
++                <!-- URI that is not a DOI or a Handle -->
++                <xsl:if test="$isDOI='false' and $isHandle='false'">
++                    <dc:identifier>
++                        <xsl:value-of select="."/>
++                    </dc:identifier>
++                </xsl:if>
++            </xsl:for-each>
++        </xsl:variable>
++        <!-- Retrieve only first URI value that is not a DOI or a Handle -->
++        <xsl:copy-of select="$uris[position()=1]"/>
++
++    </xsl:template>
++    <!-- dc.relation type cite-as for local pids -->
++    <xsl:template match="doc:element[@name='dc']/doc:element[@name='identifier']/doc:element[@name='uri']"
++                  mode="local_pid">
++        <xsl:variable name="uris">
++            <xsl:for-each select="./doc:element/doc:field[@name='value']">
++                <xsl:variable name="isDOI">
++                    <xsl:call-template name="isDOI">
++                        <xsl:with-param name="field">
++                            <xsl:value-of select="text()"/>
++                        </xsl:with-param>
++                    </xsl:call-template>
++                </xsl:variable>
++                <xsl:variable name="isHandle">
++                    <xsl:call-template name="isHandle">
++                        <xsl:with-param name="field">
++                            <xsl:value-of select="text()"/>
++                        </xsl:with-param>
++                    </xsl:call-template>
++                </xsl:variable>
++                <!-- URI that is either a DOI or a Handle -->
++                <xsl:if test="$isDOI='true' or $isHandle='true'">
++                    <dc:relation>
++                        <xsl:attribute name="rel">
++                            <xsl:value-of select="'cite-as'"/>
++                        </xsl:attribute>
++                        <xsl:value-of select="."/>
++                    </dc:relation>
++                </xsl:if>
++            </xsl:for-each>
++        </xsl:variable>
++        <!-- Retrieve only first URI value that is either a DOI or a Handle -->
++        <xsl:copy-of select="$uris[position()=1]"/>
++    </xsl:template>
++
++    <!-- dc.title -->
++    <!--  https://www.rioxx.net/profiles/v3-0-final/#dc:title -->
++    <xsl:template match="doc:element[@name='dc']/doc:element[@name='title'][position() = 1]" mode="dc">
++        <dc:title>
++            <xsl:value-of select="./doc:element/doc:field[@name='value']"/>
++        </dc:title>
++    </xsl:template>
++
++    <!-- dc.language -->
++    <!--  https://www.rioxx.net/profiles/v3-0-final/#dc:language -->
++    <xsl:template match="doc:element[@name='dc']/doc:element[@name='language']/doc:element[@name='iso']" mode="dc">
++        <!-- dc.language -->
++        <xsl:for-each select="./doc:element/doc:field[@name='value']">
++            <dc:language>
++                <xsl:value-of select="."/>
++            </dc:language>
++        </xsl:for-each>
++    </xsl:template>
++
++    <!-- dc.subject -->
++    <!--  https://www.rioxx.net/profiles/v3-0-final/#dc:subject -->
++    <xsl:template match="doc:element[@name='dc']/doc:element[@name='subject']" mode="dc">
++        <!-- dc.subject -->
++        <xsl:for-each select="./doc:element/doc:field[@name='value']">
++            <dc:subject>
++                <xsl:value-of select="."/>
++            </dc:subject>
++        </xsl:for-each>
++    </xsl:template>
++
++    <!-- dc.type -->
++    <!--  https://www.rioxx.net/profiles/v3-0-final/#dc:type -->
++    <xsl:template match="doc:element[@name='dc']/doc:element[@name='type']" mode="dc">
++        <!-- dc.type -->
++        <dc:type>
++            <xsl:call-template name="resolveResourceTypeURI">
++                <xsl:with-param name="field">
++                    <xsl:value-of select="./doc:element/doc:field[@name='value']/text()"/>
++                </xsl:with-param>
++            </xsl:call-template>
++        </dc:type>
++    </xsl:template>
++
++    <!-- dc.relation -->
++    <!--  https://www.rioxx.net/profiles/v3-0-final/#dc:relation -->
++    <xsl:template match="doc:element[@name='bundles']/doc:element[@name='bundle']" mode="dc">
++        <xsl:if test="doc:field[@name='name' and text()='ORIGINAL']">
++            <xsl:for-each select="doc:element[@name='bitstreams']/doc:element[@name='bitstream']">
++                <xsl:apply-templates select="." mode="dc"/>
++            </xsl:for-each>
++        </xsl:if>
++    </xsl:template>
++
++    <!-- dc.relation -->
++    <xsl:template match="doc:element[@name='bitstreams']/doc:element[@name='bitstream']" mode="dc">
++        <dc:relation>
++            <xsl:attribute name="rel">
++                <xsl:value-of select="'item'"/>
++            </xsl:attribute>
++            <xsl:attribute name="type">
++                <xsl:value-of select="doc:field[@name='format']"/>
++            </xsl:attribute>
++            <xsl:attribute name="coar_type">
++                <xsl:variable name="dcTypeMetadata">
++                    <xsl:call-template name="getTypeMetadata"/>
++                </xsl:variable>
++                <xsl:call-template name="resolveResourceTypeURI">
++                    <xsl:with-param name="field" select="$dcTypeMetadata"/>
++                </xsl:call-template>
++            </xsl:attribute>
++            <!-- coar_version
++            When used, the coar_version attribute MUST contain a value which is an identifier
++            from the COAR Version Types Vocabulary: http://purl.org/coar/version/.
++            -->
++            <xsl:attribute name="coar_version">
++                <xsl:call-template name="resolveResourceVersionURI">
++                    <xsl:with-param name="version">
++                        <xsl:call-template name="getRioxxVersion"/>
++                    </xsl:with-param>
++                    <xsl:with-param name="description">
++                        <xsl:value-of select="doc:field[@name='description']"/>
++                    </xsl:with-param>
++                </xsl:call-template>
++            </xsl:attribute>
++            <!-- access_rights -->
++            <xsl:variable name="bitstreamAccessStatusText">
++                <xsl:call-template name="getBitstreamAccessStatus">
++                    <xsl:with-param name="bitstream" select="."/>
++                </xsl:call-template>
++            </xsl:variable>
++            <xsl:attribute name="access_rights">
++                <!-- get the coar access rights at the individual file level -->
++                <!-- Look at resource policies to infer access level information, defaults to item-level status -->
++                <xsl:choose>
++                    <xsl:when test="$bitstreamAccessStatusText='embargo' or $bitstreamAccessStatusText='open.access' or $bitstreamAccessStatusText='restricted'">
++                        <xsl:call-template name="resolveRightsURI">
++                            <xsl:with-param name="field"
++                                            select="$bitstreamAccessStatusText"/>
++                        </xsl:call-template>
++                    </xsl:when>
++                    <xsl:otherwise>
++                        <!-- Default to item-level access status information -->
++                        <xsl:call-template name="getRightsURI"/>
++                    </xsl:otherwise>
++                </xsl:choose>
++            </xsl:attribute>
++            <!-- Add deposit date -->
++            <xsl:variable name="depositDate">
++                <xsl:call-template name="getDepositDate"/>
++            </xsl:variable>
++            <xsl:choose>
++                <xsl:when test="$depositDate!=''">
++                    <xsl:attribute name="deposit_date">
++                        <xsl:value-of select="$depositDate"/>
++                    </xsl:attribute>
++                </xsl:when>
++                <xsl:otherwise>
++                    <xsl:attribute name="deposit_date">
++                        <xsl:call-template name="getDateAccessioned"/>
++                    </xsl:attribute>
++                </xsl:otherwise>
++            </xsl:choose>
++            <!-- Add embargo information: resource_exposed_date -->
++            <!-- Only set resource_exposed_Date if access status != 'restricted' -->
++            <xsl:if test="$bitstreamAccessStatusText!='restricted'">
++                <!-- First policy found with action=READ; group=Anonymous and start-date attribute is not null -->
++                <xsl:variable name="startDate">
++                    <xsl:value-of
++                            select="doc:element[@name='resourcePolicies']/doc:element[doc:field[@name='action']/text()='READ' and doc:field[@name='group']/text()='Anonymous' and doc:field[@name='start-date']/text()][position()=1]/doc:field[@name='start-date']/text()"/>
++                </xsl:variable>
++                <xsl:variable name="dateAvailable">
++                    <xsl:call-template name="getDateAvailable"/>
++                </xsl:variable>
++                <xsl:choose>
++                    <xsl:when test="$startDate!=''">
++                        <xsl:attribute name="resource_exposed_date">
++                            <xsl:value-of select="$startDate"/>
++                        </xsl:attribute>
++                    </xsl:when>
++                    <xsl:when test="$dateAvailable!=''">
++                        <xsl:attribute name="resource_exposed_date">
++                            <xsl:value-of select="$dateAvailable"/>
++                        </xsl:attribute>
++                    </xsl:when>
++                    <xsl:otherwise>
++                        <xsl:attribute name="resource_exposed_date">
++                            <xsl:call-template name="getDateAccessioned"/>
++                        </xsl:attribute>
++                    </xsl:otherwise>
++                </xsl:choose>
++            </xsl:if>
++            <xsl:value-of select="doc:field[@name='url']/text()"/>
++        </dc:relation>
++    </xsl:template>
++
++    <!-- rioxxterms:ext_relation -->
++    <!--  https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:ext_relation -->
++    <!-- Related dataset(s) -->
++    <!-- Related published article(s) -->
++    <!-- TODO Add crosswalk to related datasets and articles -->
++
++    <!-- rioxxterms:creator -->
++    <!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:creator -->
++    <xsl:template
++            match="doc:element[@name='dc']/doc:element[@name='contributor']/doc:element[@name='author']" mode="rioxx">
++        <!-- rioxxterms:creator -->
++        <xsl:for-each select="./doc:element/doc:field[@name='value']">
++            <xsl:variable name="isRelatedEntity">
++                <xsl:call-template name="isRelatedEntity">
++                    <xsl:with-param name="element" select="."/>
++                </xsl:call-template>
++            </xsl:variable>
++            <xsl:choose>
++                <!-- if next sibling is authority and starts with virtual:: -->
++                <xsl:when test="$isRelatedEntity = 'true'">
++                    <xsl:variable name="entity">
++                        <xsl:call-template name="buildEntityNode">
++                            <xsl:with-param name="element" select="."/>
++                        </xsl:call-template>
++                    </xsl:variable>
++                    <xsl:apply-templates select="$entity" mode="entity_creator"/>
++                </xsl:when>
++                <!-- simple text metadata -->
++                <xsl:otherwise>
++                    <rioxxterms:creator>
++                        <xsl:if test="$firstAuthor=.">
++                            <xsl:attribute name="first-named-author">
++                                <xsl:text>true</xsl:text>
++                            </xsl:attribute>
++                        </xsl:if>
++                        <rioxxterms:name>
++                            <xsl:value-of select="./text()"/>
++                        </rioxxterms:name>
++                    </rioxxterms:creator>
++                </xsl:otherwise>
++            </xsl:choose>
++        </xsl:for-each>
++    </xsl:template>
++
++    <!-- rioxxterms:creator -->
++    <xsl:template match="doc:element" mode="entity_creator">
++        <xsl:variable name="isOrgUnitEntity">
++            <xsl:call-template name="hasOrganizationLegalNameField">
++                <xsl:with-param name="element" select="."/>
++            </xsl:call-template>
++        </xsl:variable>
++        <xsl:variable name="author_name">
++            <xsl:choose>
++                <xsl:when test="$isOrgUnitEntity = 'true'">
++                    <xsl:value-of select="doc:field[starts-with(@name,'organization.legalName')]"/>
++                </xsl:when>
++                <xsl:otherwise>
++                    <xsl:value-of select="doc:field[starts-with(@name,'dc.contributor.author')]"/>
++                </xsl:otherwise>
++            </xsl:choose>
++        </xsl:variable>
++        <rioxxterms:creator>
++            <xsl:if test="$firstAuthor=$author_name">
++                <xsl:attribute name="first-named-author">
++                    <xsl:text>true</xsl:text>
++                </xsl:attribute>
++            </xsl:if>
++            <rioxxterms:name>
++                <xsl:value-of select="$author_name"/>
++            </rioxxterms:name>
++            <xsl:apply-templates select="doc:field" mode="entity_author"/>
++        </rioxxterms:creator>
++    </xsl:template>
++
++    <!-- rioxxterms:contributor -->
++    <!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:contributor -->
++    <xsl:template
++            match="doc:element[@name='dc']/doc:element[@name='contributor']/doc:element[@name!='author']" mode="rioxx">
++        <xsl:for-each select="./doc:element/doc:field[@name='value']">
++            <xsl:variable name="isRelatedEntity">
++                <xsl:call-template name="isRelatedEntity">
++                    <xsl:with-param name="element" select="."/>
++                </xsl:call-template>
++            </xsl:variable>
++            <xsl:choose>
++                <!-- if next sibling is authority and starts with virtual:: -->
++                <xsl:when test="$isRelatedEntity = 'true'">
++                    <xsl:variable name="entity">
++                        <xsl:call-template name="buildEntityNode">
++                            <xsl:with-param name="element" select="."/>
++                        </xsl:call-template>
++                    </xsl:variable>
++                    <xsl:apply-templates select="$entity" mode="entity_contributor"/>
++                </xsl:when>
++                <!-- simple text metadata -->
++                <xsl:otherwise>
++                    <rioxxterms:contributor>
++                        <rioxxterms:name>
++                            <xsl:value-of select="./text()"/>
++                        </rioxxterms:name>
++                    </rioxxterms:contributor>
++                </xsl:otherwise>
++            </xsl:choose>
++        </xsl:for-each>
++    </xsl:template>
++
++    <!-- rioxxterms:contributor -->
++    <xsl:template match="doc:element" mode="entity_contributor">
++        <xsl:variable name="isOrgUnitEntity">
++            <xsl:call-template name="hasOrganizationLegalNameField">
++                <xsl:with-param name="element" select="."/>
++            </xsl:call-template>
++        </xsl:variable>
++        <rioxxterms:contributor>
++            <rioxxterms:name>
++                <xsl:choose>
++                    <xsl:when test="$isOrgUnitEntity = 'true'">
++                        <xsl:value-of select="doc:field[starts-with(@name,'organization.legalName')]"/>
++                    </xsl:when>
++                    <xsl:otherwise>
++                        <xsl:value-of select="doc:field[starts-with(@name,'dc.contributor')]"/>
++                    </xsl:otherwise>
++                </xsl:choose>
++            </rioxxterms:name>
++            <xsl:apply-templates select="doc:field" mode="entity_author"/>
++        </rioxxterms:contributor>
++    </xsl:template>
++
++    <!-- This template creates the sub-element <rioxxterms:id> from a Person built entity -->
++    <xsl:template match="doc:field[starts-with(@name,'person.identifier.*')]" mode="entity_author">
++        <!-- TODO resolve the scheme based on the value -->
++        <rioxxterms:id>
++            <xsl:value-of select="./text()"/>
++        </rioxxterms:id>
++    </xsl:template>
++
++    <!-- This template creates the sub-element <rioxxterms:id> of type ORCID from a Person built entity -->
++    <xsl:template match="doc:field[starts-with(@name,'person.identifier.orcid')]" mode="entity_author">
++        <rioxxterms:id>
++            <xsl:choose>
++                <!-- Prepend ORCID URI if field only contains the ORCID ID number -->
++                <xsl:when test="not(starts-with(./text(), 'http'))">
++                    <xsl:value-of select="concat('https://orcid.org/', ./text())"/>
++                </xsl:when>
++                <xsl:otherwise>
++                    <xsl:value-of select="./text()"/>
++                </xsl:otherwise>
++            </xsl:choose>
++        </rioxxterms:id>
++    </xsl:template>
++
++    <!-- This template creates the sub-element <rioxxterms:id> of type Scopus Author ID from a Person built entity -->
++    <xsl:template match="doc:field[starts-with(@name,'person.identifier.scopus-author-id')]"
++                  mode="entity_author">
++        <rioxxterms:id>
++            <xsl:value-of select="./text()"/>
++        </rioxxterms:id>
++    </xsl:template>
++
++    <!-- This template creates the sub-element <rioxxterms:id> of type Ciencia ID from a Person built entity -->
++    <xsl:template match="doc:field[starts-with(@name,'person.identifier.ciencia-id')]" mode="entity_author">
++        <rioxxterms:id>
++            <xsl:value-of select="./text()"/>
++        </rioxxterms:id>
++    </xsl:template>
++
++    <!-- This template creates the sub-element <rioxxterms:id> of type Researcher ID from a Person built entity -->
++    <xsl:template match="doc:field[starts-with(@name,'person.identifier.rid')]" mode="entity_author">
++        <rioxxterms:id>
++            <xsl:value-of select="./text()"/>
++        </rioxxterms:id>
++    </xsl:template>
++
++    <!-- This template creates the sub-element <rioxxterms:id> of type Google Scholar ID from a Person built entity -->
++    <xsl:template match="doc:field[starts-with(@name,'person.identifier.gsid')]" mode="entity_author">
++        <rioxxterms:id>
++            <xsl:value-of select="./text()"/>
++        </rioxxterms:id>
++    </xsl:template>
++
++    <!-- This template creates the sub-element <rioxxterms:id> of type ISNI from a Person built entity -->
++    <xsl:template match="doc:field[starts-with(@name,'person.identifier.isni')]" mode="entity_author">
++        <rioxxterms:id>
++            <xsl:value-of select="./text()"/>
++        </rioxxterms:id>
++    </xsl:template>
++
++    <!-- This template creates the sub-element <rioxxterms:id> for an organization from a built entity -->
++    <xsl:template match="doc:field[starts-with(@name,'organization.identifier.*')]" mode="entity_author">
++        <!-- TODO resolve the scheme based on the value -->
++        <rioxxterms:id>
++            <xsl:value-of select="./text()"/>
++        </rioxxterms:id>
++    </xsl:template>
++
++    <!-- This template creates the sub-element <rioxxterms:id> of type ISNI for an organization from a built entity -->
++    <xsl:template match="doc:field[starts-with(@name,'organization.identifier.isni')]" mode="entity_author">
++        <rioxxterms:id>
++            <xsl:value-of select="./text()"/>
++        </rioxxterms:id>
++    </xsl:template>
++
++    <!-- rioxxterms:grant -->
++    <!--  https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:grant -->
++    <xsl:template match="doc:element[@name='dc']/doc:element[@name='relation']" mode="rioxx">
++        <xsl:for-each select="./doc:element/doc:field[@name='value']">
++            <xsl:variable name="isRelatedEntity">
++                <xsl:call-template name="isRelatedEntity">
++                    <xsl:with-param name="element" select="."/>
++                </xsl:call-template>
++            </xsl:variable>
++            <!-- if next sibling is authority and starts with virtual:: -->
++            <xsl:if test="$isRelatedEntity = 'true'">
++                <xsl:variable name="entity">
++                    <xsl:call-template name="buildEntityNode">
++                        <xsl:with-param name="element" select="."/>
++                    </xsl:call-template>
++                </xsl:variable>
++                <xsl:apply-templates select="$entity" mode="entity_project"/>
++                <xsl:apply-templates select="$entity" mode="entity_funding"/>
++            </xsl:if>
++        </xsl:for-each>
++    </xsl:template>
++
++    <!-- rioxxterms:project -->
++    <xsl:template match="doc:element" mode="entity_project">
++        <rioxxterms:project>
++            <xsl:apply-templates select="doc:field" mode="entity_project"/>
++        </rioxxterms:project>
++    </xsl:template>
++
++    <!-- This template creates the property awardURI from a Funded Project built entity -->
++    <xsl:template match="doc:field[starts-with(@name,'oaire.awardURI')]" mode="entity_project">
++        <xsl:value-of select="./text()"/>
++    </xsl:template>
++
++    <!-- rioxxterms:grant -->
++    <xsl:template match="doc:element" mode="entity_funding">
++        <rioxxterms:grant>
++            <xsl:apply-templates select="doc:field" mode="entity_funding"/>
++        </rioxxterms:grant>
++    </xsl:template>
++
++    <!-- This template creates the attribute funderName from a Funded Project built entity -->
++    <xsl:template match="doc:field[starts-with(@name,'project.funder.name')]" mode="entity_funding">
++        <xsl:attribute name="funderName">
++            <xsl:value-of select="./text()"/>
++        </xsl:attribute>
++    </xsl:template>
++
++    <!-- This template creates the sub-element funder_id from a Funded Project built entity -->
++    <xsl:template match="doc:field[starts-with(@name,'project.funder.identifier')]" mode="entity_funding">
++        <!-- TODO: recognize the type ISNI / GRID / Crossref Funder -->
++        <xsl:attribute name="funder_id">
++            <xsl:value-of select="./text()"/>
++        </xsl:attribute>
++    </xsl:template>
++
++    <!-- This template creates the sub-element <oaire:awardNumber> from a Funded Project built entity -->
++    <xsl:template match="doc:field[starts-with(@name,'oaire.awardNumber')]" mode="entity_funding">
++        <xsl:value-of select="./text()"/>
++    </xsl:template>
++
++    <!--  -->
++    <!-- Auxiliary templates - get global values -->
++    <!--  -->
++
++    <!-- get first author globally -->
++    <xsl:template name="getFirstAuthor">
++        <xsl:value-of
++                select="//doc:element[@name='dc']/doc:element[@name='contributor']/doc:element[@name='author']/doc:element/doc:field[@name='value'][position()=1]/text()"/>
++    </xsl:template>
++    <!-- get first deposit date globally -->
++    <xsl:template name="getDepositDate">
++        <xsl:value-of
++                select="//doc:element[@name='cam']/doc:element[@name='depositDate']/doc:element/doc:field[@name='value'][position()=1]/text()"/>
++    </xsl:template>
++
++    <!-- get first accessioned date globally -->
++    <xsl:template name="getDateAccessioned">
++        <xsl:value-of
++                select="//doc:element[@name='dc']/doc:element[@name='date']/doc:element[@name='accessioned']/doc:element/doc:field[@name='value'][position()=1]/text()"/>
++    </xsl:template>
++
++    <!-- get first date available globally -->
++    <xsl:template name="getDateAvailable">
++        <xsl:value-of
++                select="//doc:element[@name='dc']/doc:element[@name='date']/doc:element[@name='available']/doc:element/doc:field[@name='value'][position()=1]/text()"/>
++    </xsl:template>
++
++    <!-- get first accepted date globally -->
++    <xsl:template name="getAcceptedDate">
++        <xsl:value-of
++                select="//doc:element[@name='dcterms']/doc:element[@name='dateAccepted']/doc:element/doc:field[@name='value'][position()=1]/text()"/>
++    </xsl:template>
++
++    <!-- get first dc type globally -->
++    <xsl:template name="getTypeMetadata">
++        <xsl:value-of
++                select="//doc:element[@name='dc']/doc:element[@name='type']/doc:element/doc:field[@name='value'][position()=1]/text()"/>
++    </xsl:template>
++
++    <!-- get first ISBN globally -->
++    <xsl:template name="getISBN">
++        <xsl:value-of
++                select="//doc:element[@name='dc']/doc:element[@name='identifier']/doc:element[@name='isbn']/doc:element/doc:field[@name='value'][position()=1]/text()"/>
++    </xsl:template>
++
++    <!-- get first ISSN globally -->
++    <xsl:template name="getISSN">
++        <xsl:value-of
++                select="//doc:element[@name='dc']/doc:element[@name='identifier']/doc:element[@name='issn']/doc:element/doc:field[@name='value'][position()=1]/text()"/>
++    </xsl:template>
++
++    <!-- get first rioxxterms:version globally -->
++    <xsl:template name="getRioxxVersion">
++        <xsl:value-of
++                select="//doc:element[@name='rioxxterms']/doc:element[@name='version']/doc:element/doc:field[@name='value'][position()=1]/text()"/>
++    </xsl:template>
++
++    <!-- get the coar access rights globally from access status mechanism -->
++    <xsl:template name="getRightsURI">
++        <xsl:call-template name="resolveRightsURI">
++            <xsl:with-param name="field"
++                            select="/doc:metadata/doc:element[@name='others']/doc:element[@name='access-status']/doc:field[@name='value']/text()"/>
++        </xsl:call-template>
++    </xsl:template>
++
++    <!-- get the coar access rights globally from access status mechanism -->
++    <xsl:template name="getRightsText">
++        <xsl:value-of select="/doc:metadata/doc:element[@name='others']/doc:element[@name='access-status']/doc:field[@name='value']/text()"/>
++    </xsl:template>
++
++    <!--
++       This template will return the COAR Version Type Vocabulary URI (https://vocabularies.coar-repositories.org/version_types/)
++       like http://purl.org/coar/version/c_71e4c1898caa6e32
++       based on a valued text like 'smur'
++    -->
++    <xsl:template name="resolveResourceVersionURI">
++        <xsl:param name="description"/>
++        <xsl:param name="version"/>
++        <xsl:variable name="lc_description">
++            <xsl:call-template name="lowercase">
++                <xsl:with-param name="value" select="$description"/>
++            </xsl:call-template>
++        </xsl:variable>
++        <xsl:variable name="lc_version">
++            <xsl:call-template name="lowercase">
++                <xsl:with-param name="value" select="$version"/>
++            </xsl:call-template>
++        </xsl:variable>
++        <xsl:choose>
++            <xsl:when test="$lc_description = 'accepted version' or $lc_version='am'">
++                <xsl:text>http://purl.org/coar/version/c_ab4af688f83e57aa</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_description = 'published version' or $lc_version='vor'">
++                <xsl:text>http://purl.org/coar/version/c_970fb48d4fbd8a85</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_description = 'submitted version' or $lc_version='ao'">
++                <xsl:text>http://purl.org/coar/version/c_b1a7d7d4d402bcce</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_version='cvor'">
++                <xsl:text>http://purl.org/coar/version/c_e19f295774971610</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_version='p'">
++                <xsl:text>http://purl.org/coar/version/c_fa2ee174bc00049f</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_version='evor'">
++                <xsl:text>http://purl.org/coar/version/c_dc82b40f9837b551</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_version='smur'">
++                <xsl:text>http://purl.org/coar/version/c_71e4c1898caa6e32</xsl:text>
++            </xsl:when>
++            <xsl:otherwise>
++                <xsl:text>http://purl.org/coar/version/c_be7fb7dd8ff6fe43</xsl:text>
++            </xsl:otherwise>
++        </xsl:choose>
++    </xsl:template>
++
++    <!--
++       This template will return the COAR Resource Type Vocabulary URI
++       like http://purl.org/coar/resource_type/c_6501
++       based on a valued text like 'article'
++       https://openaire-guidelines-for-literature-repository-managers.readthedocs.io/en/v4.0.0/field_publicationtype.html#attribute-uri-m
++    -->
++    <xsl:template name="resolveResourceTypeURI">
++        <xsl:param name="field"/>
++        <xsl:variable name="lc_dc_type">
++            <xsl:call-template name="lowercase">
++                <xsl:with-param name="value" select="$field"/>
++            </xsl:call-template>
++        </xsl:variable>
++        <xsl:choose>
++            <xsl:when test="$lc_dc_type = 'annotation'">
++                <xsl:text>http://purl.org/coar/resource_type/c_1162</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'journal'">
++                <xsl:text>http://purl.org/coar/resource_type/c_0640</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'article'">
++                <xsl:text>http://purl.org/coar/resource_type/c_6501</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'journal article'">
++                <xsl:text>http://purl.org/coar/resource_type/c_6501</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'editorial'">
++                <xsl:text>http://purl.org/coar/resource_type/c_b239</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'bachelor thesis'">
++                <xsl:text>http://purl.org/coar/resource_type/c_7a1f</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'bibliography'">
++                <xsl:text>http://purl.org/coar/resource_type/c_86bc</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'book'">
++                <xsl:text>http://purl.org/coar/resource_type/c_2f33</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'book part'">
++                <xsl:text>http://purl.org/coar/resource_type/c_3248</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'book review'">
++                <xsl:text>http://purl.org/coar/resource_type/c_ba08</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'website'">
++                <xsl:text>http://purl.org/coar/resource_type/c_7ad9</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'interactive resource'">
++                <xsl:text>http://purl.org/coar/resource_type/c_e9a0</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'conference proceedings'">
++                <xsl:text>http://purl.org/coar/resource_type/c_f744</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'conference object'">
++                <xsl:text>http://purl.org/coar/resource_type/c_c94f</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'conference paper'">
++                <xsl:text>http://purl.org/coar/resource_type/c_5794</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'conference poster'">
++                <xsl:text>http://purl.org/coar/resource_type/c_6670</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'contribution to journal'">
++                <xsl:text>http://purl.org/coar/resource_type/c_3e5a</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'data paper'">
++                <xsl:text>http://purl.org/coar/resource_type/c_beb9</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'dataset'">
++                <xsl:text>http://purl.org/coar/resource_type/c_ddb1</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'doctoral thesis'">
++                <xsl:text>http://purl.org/coar/resource_type/c_db06</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'image'">
++                <xsl:text>http://purl.org/coar/resource_type/c_c513</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'lecture'">
++                <xsl:text>http://purl.org/coar/resource_type/c_8544</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'letter'">
++                <xsl:text>http://purl.org/coar/resource_type/c_0857</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'master thesis'">
++                <xsl:text>http://purl.org/coar/resource_type/c_bdcc</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'moving image'">
++                <xsl:text>http://purl.org/coar/resource_type/c_8a7e</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'periodical'">
++                <xsl:text>http://purl.org/coar/resource_type/c_2659</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'letter to the editor'">
++                <xsl:text>http://purl.org/coar/resource_type/c_545b</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'patent'">
++                <xsl:text>http://purl.org/coar/resource_type/c_15cd</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'preprint'">
++                <xsl:text>http://purl.org/coar/resource_type/c_816b</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'report'">
++                <xsl:text>http://purl.org/coar/resource_type/c_93fc</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'report part'">
++                <xsl:text>http://purl.org/coar/resource_type/c_ba1f</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'research proposal'">
++                <xsl:text>http://purl.org/coar/resource_type/c_baaf</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'review'">
++                <xsl:text>http://purl.org/coar/resource_type/c_efa0</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'software'">
++                <xsl:text>http://purl.org/coar/resource_type/c_5ce6</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'still image'">
++                <xsl:text>http://purl.org/coar/resource_type/c_ecc8</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'technical documentation'">
++                <xsl:text>http://purl.org/coar/resource_type/c_71bd</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'workflow'">
++                <xsl:text>http://purl.org/coar/resource_type/c_393c</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'working paper'">
++                <xsl:text>http://purl.org/coar/resource_type/c_8042</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'thesis'">
++                <xsl:text>http://purl.org/coar/resource_type/c_46ec</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'cartographic material'">
++                <xsl:text>http://purl.org/coar/resource_type/c_12cc</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'map'">
++                <xsl:text>http://purl.org/coar/resource_type/c_12cd</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'video'">
++                <xsl:text>http://purl.org/coar/resource_type/c_12ce</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'sound'">
++                <xsl:text>http://purl.org/coar/resource_type/c_18cc</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'musical composition'">
++                <xsl:text>http://purl.org/coar/resource_type/c_18cd</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'text'">
++                <xsl:text>http://purl.org/coar/resource_type/c_18cf</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'conference paper not in proceedings'">
++                <xsl:text>http://purl.org/coar/resource_type/c_18cp</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'conference poster not in proceedings'">
++                <xsl:text>http://purl.org/coar/resource_type/c_18co</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'musical notation'">
++                <xsl:text>http://purl.org/coar/resource_type/c_18cw</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'internal report'">
++                <xsl:text>http://purl.org/coar/resource_type/c_18ww</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'memorandum'">
++                <xsl:text>http://purl.org/coar/resource_type/c_18wz</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'other type of report'">
++                <xsl:text>http://purl.org/coar/resource_type/c_18wq</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'policy report'">
++                <xsl:text>http://purl.org/coar/resource_type/c_186u</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'project deliverable'">
++                <xsl:text>http://purl.org/coar/resource_type/c_18op</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'report to funding agency'">
++                <xsl:text>http://purl.org/coar/resource_type/c_18hj</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'research report'">
++                <xsl:text>http://purl.org/coar/resource_type/c_18ws</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'technical report'">
++                <xsl:text>http://purl.org/coar/resource_type/c_18gh</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'review article'">
++                <xsl:text>http://purl.org/coar/resource_type/c_dcae04bc</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'research article'">
++                <xsl:text>http://purl.org/coar/resource_type/c_2df8fbb1</xsl:text>
++            </xsl:when>
++            <!-- other -->
++            <xsl:otherwise>
++                <xsl:text>http://purl.org/coar/resource_type/c_1843</xsl:text>
++            </xsl:otherwise>
++        </xsl:choose>
++    </xsl:template>
++
++    <!-- This template will return the access.status at the bitstream level -->
++    <xsl:template name="getBitstreamAccessStatus">
++        <xsl:param name="bitstream"/>
++        <!-- get the coar access rights at the individual file level -->
++        <!-- Look at resource policies to infer access level information, defaults to item-level status -->
++        <xsl:choose>
++            <xsl:when test="$bitstream/doc:element[@name='resourcePolicies']/doc:element[doc:field[@name='action']/text()='READ' and doc:field[@name='group']/text()='Anonymous' and doc:field[@name='start-date']]">
++                <xsl:value-of select="'embargo'"/>
++            </xsl:when>
++            <xsl:when test="doc:element[@name='resourcePolicies']/doc:element[doc:field[@name='action']/text()='READ' and doc:field[@name='group']/text()='Anonymous' and not(doc:field[@name='start-date'])]">
++                <xsl:value-of select="'open.access'"/>
++            </xsl:when>
++            <xsl:when test="$bitstream/doc:element[@name='resourcePolicies']/doc:element[doc:field[@name='action']/text()='READ' and doc:field[@name='group']/text()='Administrator']">
++                <xsl:value-of select="'restricted'"/>
++            </xsl:when>
++            <xsl:otherwise>
++                <!-- Default to item-level access status information - in text form -->
++                <xsl:call-template name="getRightsText"/>
++            </xsl:otherwise>
++        </xsl:choose>
++    </xsl:template>
++
++    <!--
++        This template will return the COAR Access Right Vocabulary URI
++        like http://purl.org/coar/access_right/c_abf2
++        based on a value text like 'open access'
++        https://openaire-guidelines-for-literature-repository-managers.readthedocs.io/en/v4.0.0/field_accessrights.html#definition-and-usage-instruction
++     -->
++    <xsl:template name="resolveRightsURI">
++        <xsl:param name="field"/>
++        <xsl:variable name="lc_value">
++            <xsl:call-template name="lowercase">
++                <xsl:with-param name="value" select="$field"/>
++            </xsl:call-template>
++        </xsl:variable>
++        <xsl:choose>
++            <xsl:when test="$lc_value = 'open access' or $lc_value = 'open.access'">
++                <xsl:text>http://purl.org/coar/access_right/c_abf2</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_value = 'embargoed access' or $lc_value = 'embargo'">
++                <xsl:text>http://purl.org/coar/access_right/c_f1cf</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_value = 'restricted access' or $lc_value = 'restricted'">
++                <xsl:text>http://purl.org/coar/access_right/c_16ec</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_value = 'metadata only access' or $lc_value = 'metadata.only'">
++                <xsl:text>http://purl.org/coar/access_right/c_14cb</xsl:text>
++            </xsl:when>
++            <xsl:otherwise/>
++        </xsl:choose>
++    </xsl:template>
++
++    <!-- get first issued date globally -->
++    <xsl:template name="getIssuedDate">
++        <xsl:value-of
++                select="//doc:element[@name='date']/doc:element[@name='issued']/doc:element/doc:field[@name='value' and position()=1]/text()"/>
++    </xsl:template>
++
++    <!-- Utils and auxiliary templates -->
++    <xsl:template name="substring-before-last">
++        <xsl:param name="string1" select="''"/>
++        <xsl:param name="string2" select="''"/>
++        <xsl:if test="$string1 != '' and $string2 != ''">
++            <xsl:variable name="head" select="substring-before($string1, $string2)"/>
++            <xsl:variable name="tail" select="substring-after($string1, $string2)"/>
++            <xsl:value-of select="$head"/>
++            <xsl:if test="contains($tail, $string2)">
++                <xsl:value-of select="$string2"/>
++                <xsl:call-template name="substring-before-last">
++                    <xsl:with-param name="string1" select="$tail"/>
++                    <xsl:with-param name="string2" select="$string2"/>
++                </xsl:call-template>
++            </xsl:if>
++        </xsl:if>
++    </xsl:template>
++
++    <!--  -->
++    <!-- Auxiliary templates - dealing with Entities -->
++    <!--  -->
++
++    <!--
++        this template will verify if a field name with "authority"
++        is present and if it starts with "virtual::"
++        if it occurs, then we are in a presence of a related entity
++     -->
++    <xsl:template name="isRelatedEntity">
++        <xsl:param name="element"/>
++        <xsl:variable name="sibling1" select="$element/following-sibling::*[1]"/>
++        <!-- if next sibling is authority and starts with virtual:: -->
++        <xsl:choose>
++            <xsl:when test="$sibling1[@name='authority' and starts-with(text(),'virtual::')]">
++                <xsl:value-of select="true()"/>
++            </xsl:when>
++            <xsl:otherwise>
++                <xsl:value-of select="false()"/>
++            </xsl:otherwise>
++        </xsl:choose>
++    </xsl:template>
++
++    <!--
++        this template will try to look for all "virtual::"
++        and rebuild an "Entity" based on all virtual fields
++        in the source data.
++        This will retrieve something like:
++        <element name="virtual::226">
++           <field name="dc.contributor.author.none">Doe, John</field>
++           <field name="person.givenName.none">John</field>
++           <field name="person.familyName.none">Doe</field>
++           <field name="relation.isAuthorOfPublication.none">3f685bbd-07d9-403e-9de2-b8f0fabe27a7</field>
++        </element>
++     -->
++    <xsl:template name="buildEntityNode">
++        <xsl:param name="element"/>
++        <!-- authority? -->
++        <xsl:variable name="sibling1" select="$element/following-sibling::*[1]"/>
++        <!-- confidence? -->
++        <xsl:variable name="sibling2" select="$element/following-sibling::*[2]"/>
++        <!-- if next sibling is authority and starts with virtual:: -->
++        <xsl:if test="$sibling1[@name='authority' and starts-with(text(),'virtual::')]">
++            <xsl:variable name="relation_id" select="$sibling1[1]/text()"/>
++            <xsl:element name="element" namespace="http://www.lyncode.com/xoai">
++                <xsl:attribute name="name">
++                    <xsl:value-of select="$relation_id"/>
++                </xsl:attribute>
++                <!-- search for all virtual relations elements in XML -->
++                <xsl:for-each select="//doc:field[text()=$relation_id]/preceding-sibling::*[1]">
++                    <xsl:element name="field" namespace="http://www.lyncode.com/xoai">
++                        <xsl:attribute name="name">
++                            <xsl:call-template name="buildEntityFieldName">
++                                <xsl:with-param name="element" select="."/>
++                            </xsl:call-template>
++                        </xsl:attribute>
++                        <!-- field value -->
++                        <xsl:value-of select="./text()"/>
++                    </xsl:element>
++                </xsl:for-each>
++            </xsl:element>
++        </xsl:if>
++    </xsl:template>
++
++    <!--
++         This template will recursively create the field name based on parent node names
++         to be something like this:
++         person.familyName.*
++     -->
++    <xsl:template name="buildEntityFieldName">
++        <xsl:param name="element"/>
++        <xsl:choose>
++            <xsl:when test="$element/..">
++                <xsl:call-template name="buildEntityFieldName">
++                    <xsl:with-param name="element" select="$element/.."/>
++                </xsl:call-template>
++                <!-- if parent isn't an element then don't include '.' -->
++                <xsl:if test="local-name($element/../..) = 'element'">
++                    <xsl:text>.</xsl:text>
++                </xsl:if>
++                <xsl:value-of select="$element/../@name"/>
++            </xsl:when>
++            <xsl:otherwise/>
++        </xsl:choose>
++    </xsl:template>
++
++
++    <!--  -->
++    <!-- Other Auxiliary templates -->
++    <!--  -->
++    <xsl:param name="smallcase" select="'abcdefghijklmnopqrstuvwxyzàèìòùáéíóúýâêîôûãñõäëïöüÿåæœçðø'"/>
++    <xsl:param name="uppercase" select="'ABCDEFGHIJKLMNOPQRSTUVWXYZÀÈÌÒÙÁÉÍÓÚÝÂÊÎÔÛÃÑÕÄËÏÖÜŸÅÆŒÇÐØ'"/>
++
++    <!-- to retrieve a string in uppercase -->
++    <xsl:template name="uppercase">
++        <xsl:param name="value"/>
++        <xsl:value-of select="translate($value, $smallcase, $uppercase)"/>
++    </xsl:template>
++
++    <!-- to retrieve a string in lowercase -->
++    <xsl:template name="lowercase">
++        <xsl:param name="value"/>
++        <xsl:value-of select="translate($value, $uppercase, $smallcase)"/>
++    </xsl:template>
++
++    <!--
++        this template will verify if an element
++        has any field that has the name starting "organization.legalName"
++     -->
++    <xsl:template name="hasOrganizationLegalNameField">
++        <xsl:param name="element"/>
++        <xsl:choose>
++            <xsl:when test="$element/doc:field[starts-with(@name,'organization.legalName')]">
++                <xsl:value-of select="true()"/>
++            </xsl:when>
++            <xsl:otherwise>
++                <xsl:value-of select="false()"/>
++            </xsl:otherwise>
++        </xsl:choose>
++    </xsl:template>
++
++    <!-- it will verify if a given field is a handle -->
++    <xsl:template name="isHandle">
++        <xsl:param name="field"/>
++        <xsl:choose>
++            <xsl:when test="$field[contains(text(),'hdl.handle.net')]">
++                <xsl:value-of select="true()"/>
++            </xsl:when>
++            <xsl:otherwise>
++                <xsl:value-of select="false()"/>
++            </xsl:otherwise>
++        </xsl:choose>
++    </xsl:template>
++
++    <!-- it will verify if a given field is a DOI -->
++    <xsl:template name="isDOI">
++        <xsl:param name="field"/>
++        <xsl:choose>
++            <xsl:when test="$field[contains(text(),'doi.org') or starts-with(text(),'10.')]">
++                <xsl:value-of select="true()"/>
++            </xsl:when>
++            <xsl:otherwise>
++                <xsl:value-of select="false()"/>
++            </xsl:otherwise>
++        </xsl:choose>
++    </xsl:template>
++
++    <!-- ignore all non specified text values or attributes -->
++    <xsl:template match="text()|@*"/>
++    <xsl:template match="text()|@*" mode="rioxx"/>
++    <xsl:template match="text()|@*" mode="entity_author"/>
++    <xsl:template match="text()|@*" mode="entity_project"/>
++    <xsl:template match="text()|@*" mode="entity_funding"/>
++
++</xsl:stylesheet>
+diff --git a/dspace/config/crosswalks/oai/transformers/rioxx.xsl b/dspace/config/crosswalks/oai/transformers/rioxx.xsl
+new file mode 100644
+index 0000000000..7fc597b483
+--- /dev/null
++++ b/dspace/config/crosswalks/oai/transformers/rioxx.xsl
+@@ -0,0 +1,361 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++
++
++    The contents of this file are subject to the license and copyright
++    detailed in the LICENSE and NOTICE files at the root of the source
++    tree and available online at
++
++    http://www.dspace.org/license/
++
++	Developed by DSpace @ Lyncode <dspace@lyncode.com>
++	Following Driver Guidelines 2.0:
++		- http://www.driver-support.eu/managers.html#guidelines
++
++ -->
++<xsl:stylesheet version="1.0"
++	xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:doc="http://www.lyncode.com/xoai">
++	<xsl:output indent="yes" method="xml" omit-xml-declaration="yes" />
++
++	<xsl:template match="@*|node()">
++		<xsl:copy>
++			<xsl:apply-templates select="@*|node()" />
++		</xsl:copy>
++	</xsl:template>
++
++    <!-- Formatting dc.date.issued -->
++    <xsl:template match="/doc:metadata/doc:element[@name='dc']/doc:element[@name='date']/doc:element[@name='issued']/doc:element/doc:field/text()">
++        <xsl:call-template name="formatdate">
++            <xsl:with-param name="datestr" select="." />
++        </xsl:call-template>
++    </xsl:template>
++
++    <!-- Formatting dc.date.available -->
++    <xsl:template match="/doc:metadata/doc:element[@name='dc']/doc:element[@name='date']/doc:element[@name='available']/doc:element/doc:field/text()">
++        <xsl:call-template name="formatdate">
++            <xsl:with-param name="datestr" select="." />
++        </xsl:call-template>
++    </xsl:template>
++
++    <!-- Formatting dc.date.accessioned -->
++    <xsl:template match="/doc:metadata/doc:element[@name='dc']/doc:element[@name='date']/doc:element[@name='accessioned']/doc:element/doc:field/text()">
++        <xsl:call-template name="formatdate">
++            <xsl:with-param name="datestr" select="." />
++        </xsl:call-template>
++    </xsl:template>
++
++    <xsl:template name="formatdate">
++        <xsl:param name="datestr" />
++        <xsl:variable name="sub">
++            <xsl:value-of select="substring($datestr,1,10)" />
++        </xsl:variable>
++        <xsl:value-of select="$sub" />
++    </xsl:template>
++
++    <!--
++    Modifying and normalizing dc.language
++    to ISO 639-3 (from ISO 639-1) for each language available at the submission form
++    -->
++    <xsl:template
++            match="/doc:metadata/doc:element[@name='dc']/doc:element[@name='language']/doc:element[@name='iso']/doc:element/doc:field/text()">
++
++        <xsl:variable name="lc_value">
++            <xsl:call-template name="lowercase">
++                <xsl:with-param name="value" select="."/>
++            </xsl:call-template>
++        </xsl:variable>
++        <xsl:choose>
++            <xsl:when test="$lc_value = 'en_US'">
++                <xsl:text>eng</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_value = 'en'">
++                <xsl:text>eng</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_value = 'es'">
++                <xsl:text>spa</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_value = 'de'">
++                <xsl:text>deu</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_value = 'fr'">
++                <xsl:text>fra</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_value = 'it'">
++                <xsl:text>ita</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_value = 'ja'">
++                <xsl:text>jpn</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_value = 'zh'">
++                <xsl:text>zho</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_value = 'pt'">
++                <xsl:text>por</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_value = 'tr'">
++                <xsl:text>tur</xsl:text>
++            </xsl:when>
++            <xsl:otherwise>
++                <xsl:value-of select="."/>
++            </xsl:otherwise>
++        </xsl:choose>
++    </xsl:template>
++
++    <!-- Modifying and normalizing dc.type according to COAR Controlled Vocabulary for Resource Type
++    Genres (Version 2.0) (http://vocabularies.coar-repositories.org/documentation/resource_types/) -->
++    <xsl:template
++            match="/doc:metadata/doc:element[@name='dc']/doc:element[@name='type']/doc:element/doc:field/text()">
++        <xsl:variable name="dc_type" select="."/>
++        <xsl:variable name="lc_dc_type">
++            <xsl:call-template name="lowercase">
++                <xsl:with-param name="value" select="."/>
++            </xsl:call-template>
++        </xsl:variable>
++        <xsl:choose>
++            <xsl:when
++                    test="$lc_dc_type = 'annotation' or $dc_type = 'http://purl.org/coar/resource_type/c_1162'">
++                <xsl:text>annotation</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'journal'">
++                <xsl:text>journal</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'journal article' or $lc_dc_type = 'article' or $lc_dc_type = 'journalarticle' or $dc_type = 'http://purl.org/coar/resource_type/c_6501'">
++                <xsl:text>journal article</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'editorial' or $dc_type = 'http://purl.org/coar/resource_type/c_b239'">
++                <xsl:text>editorial</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'bachelor thesis' or $lc_dc_type = 'bachelorthesis' or $dc_type = 'http://purl.org/coar/resource_type/c_7a1f'">
++                <xsl:text>bachelor thesis</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'bibliography' or $dc_type = 'http://purl.org/coar/resource_type/c_86bc'">
++                <xsl:text>bibliography</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'book' or $dc_type = 'http://purl.org/coar/resource_type/c_2f33'">
++                <xsl:text>book</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'book part' or $lc_dc_type = 'bookpart' or $dc_type = 'http://purl.org/coar/resource_type/c_3248'">
++                <xsl:text>book part</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'book review' or $lc_dc_type = 'bookreview' or $dc_type = 'http://purl.org/coar/resource_type/c_ba08'">
++                <xsl:text>book review</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'website' or $dc_type = 'http://purl.org/coar/resource_type/c_7ad9'">
++                <xsl:text>website</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'interactive resource' or $lc_dc_type = 'interactiveresource' or $dc_type = 'http://purl.org/coar/resource_type/c_e9a0'">
++                <xsl:text>interactive resource</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'conference proceedings' or $lc_dc_type = 'conferenceproceedings' or $dc_type = 'http://purl.org/coar/resource_type/c_f744'">
++                <xsl:text>conference proceedings</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'conference object' or $lc_dc_type = 'conferenceobject' or $dc_type = 'http://purl.org/coar/resource_type/c_c94f'">
++                <xsl:text>conference object</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'conference paper' or $lc_dc_type = 'conferencepaper' or $dc_type = 'http://purl.org/coar/resource_type/c_5794'">
++                <xsl:text>conference paper</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'conference poster' or $lc_dc_type = 'conferenceposter' or $dc_type = 'http://purl.org/coar/resource_type/c_6670'">
++                <xsl:text>conference poster</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'contribution to journal' or $lc_dc_type = 'contributiontojournal' or $dc_type = 'http://purl.org/coar/resource_type/c_3e5a'">
++                <xsl:text>contribution to journal</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'datapaper' or $dc_type = 'http://purl.org/coar/resource_type/c_beb9'">
++                <xsl:text>data paper</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'dataset' or $dc_type = 'http://purl.org/coar/resource_type/c_ddb1'">
++                <xsl:text>dataset</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'doctoral thesis' or $lc_dc_type = 'doctoralthesis' or $dc_type = 'http://purl.org/coar/resource_type/c_db06'">
++                <xsl:text>doctoral thesis</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'image' or $dc_type = 'http://purl.org/coar/resource_type/c_c513'">
++                <xsl:text>image</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'lecture' or $dc_type = 'http://purl.org/coar/resource_type/c_8544'">
++                <xsl:text>lecture</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'letter' or $dc_type = 'http://purl.org/coar/resource_type/c_0857'">
++                <xsl:text>letter</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'master thesis' or $lc_dc_type = 'masterthesis' or $dc_type = 'http://purl.org/coar/resource_type/c_bdcc'">
++                <xsl:text>master thesis</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'moving image' or $lc_dc_type = 'movingimage' or $dc_type = 'http://purl.org/coar/resource_type/c_8a7e'">
++                <xsl:text>moving image</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'periodical' or $dc_type = 'http://purl.org/coar/resource_type/c_2659'">
++                <xsl:text>periodical</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'letter to the editor' or $lc_dc_type = 'lettertotheeditor' or $dc_type = 'http://purl.org/coar/resource_type/c_545b'">
++                <xsl:text>letter to the editor</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'patent' or $dc_type = 'http://purl.org/coar/resource_type/c_15cd'">
++                <xsl:text>patent</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'preprint' or $dc_type = 'http://purl.org/coar/resource_type/c_816b'">
++                <xsl:text>preprint</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'report' or $dc_type = 'http://purl.org/coar/resource_type/c_93fc'">
++                <xsl:text>report</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'report part' or $lc_dc_type = 'reportpart' or $dc_type = 'http://purl.org/coar/resource_type/c_ba1f'">
++                <xsl:text>report part</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'research proposal' or $lc_dc_type = 'researchproposal' or $dc_type = 'http://purl.org/coar/resource_type/c_baaf'">
++                <xsl:text>research proposal</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'review' or $dc_type = 'http://purl.org/coar/resource_type/c_efa0'">
++                <xsl:text>review</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'software' or $dc_type = 'http://purl.org/coar/resource_type/c_5ce6'">
++                <xsl:text>software</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'still image' or $lc_dc_type = 'stillimage' or $dc_type = 'http://purl.org/coar/resource_type/c_ecc8'">
++                <xsl:text>still image</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'technical documentation' or $lc_dc_type = 'technicaldocumentation' or $dc_type = 'http://purl.org/coar/resource_type/c_71bd'">
++                <xsl:text>technical documentation</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'workflow' or $dc_type = 'http://purl.org/coar/resource_type/c_393c'">
++                <xsl:text>workflow</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'working paper' or $lc_dc_type = 'workingpaper' or $dc_type = 'http://purl.org/coar/resource_type/c_8042'">
++                <xsl:text>working paper</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'thesis' or $dc_type = 'http://purl.org/coar/resource_type/c_46ec'">
++                <xsl:text>thesis</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'cartographic material' or $lc_dc_type = 'cartographicmaterial' or $dc_type = 'http://purl.org/coar/resource_type/c_12cc'">
++                <xsl:text>cartographic material</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'map' or $dc_type = 'http://purl.org/coar/resource_type/c_12cd'">
++                <xsl:text>map</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'video' or $dc_type = 'http://purl.org/coar/resource_type/c_12ce'">
++                <xsl:text>video</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'sound' or $dc_type = 'http://purl.org/coar/resource_type/c_18cc'">
++                <xsl:text>sound</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'musical composition' or $lc_dc_type = 'musicalcomposition' or $dc_type = 'http://purl.org/coar/resource_type/c_18cd'">
++                <xsl:text>musical composition</xsl:text>
++            </xsl:when>
++            <xsl:when test="$lc_dc_type = 'text' or $dc_type = 'http://purl.org/coar/resource_type/c_18cf'">
++                <xsl:text>text</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'conference paper not in proceedings' or $lc_dc_type = 'conferencepapernotinproceedings' or $dc_type = 'http://purl.org/coar/resource_type/c_18cp'">
++                <xsl:text>conference paper not in proceedings</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'conference poster not in proceedings' or $lc_dc_type = 'conferenceposternotinproceedings' or $dc_type = 'http://purl.org/coar/resource_type/c_18co'">
++                <xsl:text>conference poster not in proceedings</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'musical notation' or $dc_type = 'http://purl.org/coar/resource_type/c_18cw'">
++                <xsl:text>musical notation</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'internal report' or $lc_dc_type = 'internalreport' or $dc_type = 'http://purl.org/coar/resource_type/c_18ww'">
++                <xsl:text>internal report</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'memorandum' or $dc_type = 'http://purl.org/coar/resource_type/c_18wz'">
++                <xsl:text>memorandum</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'other type of report'  or $lc_dc_type = 'othertypeofreport' or $dc_type = 'http://purl.org/coar/resource_type/c_18wq'">
++                <xsl:text>other type of report</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'policy report' or $lc_dc_type = 'policyreport'  or $dc_type = 'http://purl.org/coar/resource_type/c_186u'">
++                <xsl:text>policy report</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'project deliverable' or $lc_dc_type = 'projectdeliverable' or $dc_type = 'http://purl.org/coar/resource_type/c_18op'">
++                <xsl:text>project deliverable</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'report to funding agency' or $lc_dc_type = 'reporttofundingagency' or $dc_type = 'http://purl.org/coar/resource_type/c_18hj'">
++                <xsl:text>report to funding agency</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'research report' or $lc_dc_type = 'researchreport' or $dc_type = 'http://purl.org/coar/resource_type/c_18ws'">
++                <xsl:text>research report</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'technical report' or $lc_dc_type = 'technicalreport' or $dc_type = 'http://purl.org/coar/resource_type/c_18gh'">
++                <xsl:text>technical report</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'review article' or $lc_dc_type = 'reviewarticle' or $dc_type = 'http://purl.org/coar/resource_type/c_dcae04bc'">
++                <xsl:text>review article</xsl:text>
++            </xsl:when>
++            <xsl:when
++                    test="$lc_dc_type = 'research article' or $lc_dc_type = 'researcharticle' or $dc_type = 'http://purl.org/coar/resource_type/c_2df8fbb1'">
++                <xsl:text>research article</xsl:text>
++            </xsl:when>
++            <xsl:otherwise>
++                <xsl:text>other</xsl:text>
++            </xsl:otherwise>
++        </xsl:choose>
++
++    </xsl:template>
++
++    <!--  -->
++    <!-- Other Auxiliary templates -->
++    <!--  -->
++    <xsl:param name="smallcase" select="'abcdefghijklmnopqrstuvwxyzàèìòùáéíóúýâêîôûãñõäëïöüÿåæœçðø'"/>
++    <xsl:param name="uppercase" select="'ABCDEFGHIJKLMNOPQRSTUVWXYZÀÈÌÒÙÁÉÍÓÚÝÂÊÎÔÛÃÑÕÄËÏÖÜŸÅÆŒÇÐØ'"/>
++
++    <!-- to retrieve a string in uppercase -->
++    <xsl:template name="uppercase">
++        <xsl:param name="value"/>
++        <xsl:value-of select="translate($value, $smallcase, $uppercase)"/>
++    </xsl:template>
++
++    <!-- to retrieve a string in lowercase -->
++    <xsl:template name="lowercase">
++        <xsl:param name="value"/>
++        <xsl:value-of select="translate($value, $uppercase, $smallcase)"/>
++    </xsl:template>
++
++    <!-- to retrieve a string which the first letter is in uppercase -->
++    <xsl:template name="ucfirst">
++        <xsl:param name="value"/>
++        <xsl:call-template name="uppercase">
++            <xsl:with-param name="value" select="substring($value, 1, 1)"/>
++        </xsl:call-template>
++        <xsl:call-template name="lowercase">
++            <xsl:with-param name="value" select="substring($value, 2)"/>
++        </xsl:call-template>
++    </xsl:template>
++</xsl:stylesheet>
++
+diff --git a/dspace/config/crosswalks/oai/xoai.xml b/dspace/config/crosswalks/oai/xoai.xml
+index e843814dd7..0f1cdf7d68 100644
+--- a/dspace/config/crosswalks/oai/xoai.xml
++++ b/dspace/config/crosswalks/oai/xoai.xml
+@@ -19,6 +19,7 @@
+             <Format ref="qdc"/>
+             <Format ref="marc"/>
+             <Format ref="uketd_dc"/>
++            <Format ref="rioxx"/>
+             <!--<Format ref="junii2" />-->
+             <Description>
+                 This is the default context of the DSpace OAI-PMH data provider.
+@@ -47,7 +48,7 @@
+         </Context>
+ 
+         <!--
+-            OpenAIRE Guidelines 3.0:
++            Openaire Guidelines 3.0:
+ 
+             - https://guidelines.openaire.eu/
+ 
+@@ -55,10 +56,10 @@
+ 
+             - Predefined DSpace fields don't allow to set this up with a default.
+          -->
+-        <Context baseurl="openaire" name="OpenAIRE Context">
++        <Context baseurl="openaire" name="Openaire Context">
+             <!-- Date format, field prefixes, etc are ensured by the transformer -->
+             <Transformer ref="openaireTransformer"/>
+-            <!-- OpenAIRE filter -->
++            <!-- Openaire filter -->
+             <Filter ref="openAireFilter"/>
+             <!-- Just an alias, in fact it returns all items within the driver context -->
+             <Set ref="openaireSet"/>
+@@ -66,12 +67,12 @@
+             <Format ref="oaidc"/>
+             <Format ref="mets"/>
+             <Description>
+-                This contexts complies with OpenAIRE Guidelines for Literature Repositories v3.0.
++                This context complies with OpenAIRE Guidelines for Literature Repositories v3.0.
+             </Description>
+         </Context>
+ 
+         <!--
+-            OpenAIRE Guidelines 4.0:
++            Openaire Guidelines 4.0:
+ 
+             - https://openaire-guidelines-for-literature-repository-managers.readthedocs.io/en/v4.0.0/
+ 
+@@ -79,15 +80,32 @@
+ 
+             - Predefined DSpace fields don't allow to set this up with a default.
+          -->
+-        <Context baseurl="openaire4" name="OpenAIRE 4 Context">
++        <Context baseurl="openaire4" name="Openaire 4 Context">
+             <!-- Date format, field prefixes, etc are ensured by the transformer -->
+             <Transformer ref="openaire4Transformer"/>
+-            <!-- OpenAIRE filter -->
+-            <Filter ref="openAIRE4Filter"/>
++            <!-- Openaire filter -->
++            <Filter ref="openaire4Filter"/>
+             <!-- Metadata Formats -->
+             <Format ref="oaiopenaire"/>
+             <Description>
+-                This contexts complies with OpenAIRE Guidelines for Literature Repositories v4.0.
++                This contexts complies with Openaire Guidelines for Literature Repositories v4.0.
++            </Description>
++        </Context>
++        <!--
++            Rioxx Guidelines v3.0 Final:
++            - https://www.rioxx.net/profiles/v3-0-final
++
++         -->
++        <Context baseurl="rioxx" name="Rioxx Context">
++            <!-- Date format, field prefixes, etc are ensured by the transformer -->
++            <Transformer ref="rioxxTransformer"/>
++            <Filter ref="rioxxFilter"/>
++            <!-- Metadata Formats -->
++            <Format ref="oaidc"/>
++            <Format ref="rioxx"/>
++            <Format ref="qdc"/>
++            <Description>
++                This context complies with the Rioxx metadata profile version 3
+             </Description>
+         </Context>
+ 
+@@ -176,7 +194,7 @@
+             <Namespace>http://irdb.nii.ac.jp/oai</Namespace>
+             <SchemaLocation>http://irdb.nii.ac.jp/oai/junii2-3-1.xsd</SchemaLocation>
+         </Format>
+-        <!-- Metadata format based on the OpenAIRE 4.0 guidelines
++        <!-- Metadata format based on the Openaire 4.0 guidelines
+              https://openaire-guidelines-for-literature-repository-managers.readthedocs.io/en/v4.0.0/use_of_oai_pmh.html
+         -->
+         <Format id="oaiopenaire">
+@@ -185,17 +203,34 @@
+             <Namespace>http://namespace.openaire.eu/schema/oaire/</Namespace>
+             <SchemaLocation>https://www.openaire.eu/schema/repo-lit/4.0/openaire.xsd</SchemaLocation>
+         </Format>
++        <!-- Metadata format based on the Rioxx Application Profile Version 3.0 Final
++             - https://www.rioxx.net/profiles/v3-0-final
++        -->
++        <Format id="rioxx">
++            <Prefix>rioxx</Prefix>
++            <XSLT>metadataFormats/rioxx.xsl</XSLT>
++            <Namespace>http://www.rioxx.net/schema/v3.0/rioxx/</Namespace>
++            <SchemaLocation>http://www.rioxx.net/schema/v3.0/rioxx/ http://www.rioxx.net/schema/v3.0/rioxx/rioxx.xsd</SchemaLocation>
++            <Filter ref="rioxxFilter"/>
++        </Format>
+     </Formats>
+ 
+     <Transformers>
+         <Transformer id="driverTransformer">
+             <XSLT>transformers/driver.xsl</XSLT>
++            <Description>Driver context transformer</Description>
+         </Transformer>
+         <Transformer id="openaireTransformer">
+             <XSLT>transformers/openaire.xsl</XSLT>
++            <Description>OpenAire context transformer</Description>
+         </Transformer>
+         <Transformer id="openaire4Transformer">
+             <XSLT>transformers/openaire4.xsl</XSLT>
++            <Description>OpenAire v4 context transformer</Description>
++        </Transformer>
++        <Transformer id="rioxxTransformer">
++            <XSLT>transformers/rioxx.xsl</XSLT>
++            <Description>Rioxx context transformer</Description>
+         </Transformer>
+     </Transformers>
+ 
+@@ -250,13 +285,13 @@
+             </Definition>
+         </Filter>
+ 
+-        <!-- OpenAIRE filter for records returned by OAI-PMH.
++        <!-- Openaire filter for records returned by OAI-PMH.
+              By default, return an Item record:
+                * If a Title & Author field both exist
+                * AND a valid DRIVER Document Type exists
+                * AND Item is either publicly accessible OR Withdrawn (for tombstones)
+-               * AND the OpenAIRE "dc.relation" is specified
+-             This filter is only used in the OpenAIRE context ([oai]/openaire).
++               * AND the Openaire "dc.relation" is specified
++             This filter is only used in the Openaire context ([oai]/openaire).
+         -->
+         <Filter id="openAireFilter">
+             <Definition>
+@@ -319,7 +354,7 @@
+             </Definition>
+         </Filter>
+ 
+-        <!-- OpenAIRE4 filter for records returned by OAI-PMH.
++        <!-- Openaire4 filter for records returned by OAI-PMH.
+              By default, return an Item record:
+                 * If it is publicly accessible
+                 * * OR it has been withdrawn (in order to display a tombstone record).
+@@ -328,7 +363,7 @@
+                 * limiting the results only to Publications as expected
+              This filter is used by the default context ([oai]/request).
+         -->
+-        <Filter id="openAIRE4Filter">
++        <Filter id="openaire4Filter">
+             <Definition>
+                 <And>
+                     <LeftCondition>
+@@ -359,6 +394,67 @@
+             </Definition>
+         </Filter>
+ 
++        <!-- Rioxx v3.0 Final filter for records returned by OAI-PMH.
++             By default, return an Item record:
++                * If it is publicly accessible
++                * * OR it has been withdrawn (in order to display a tombstone record).
++                * AND it does have the following elements
++                * * title
++                * * Authors
++                * * dc.type is present OR dspace.entity.type is Publication
++                * * dateAccepted
++                * * language
++             This filter is only used in the Rioxx context ([oai]/rioxx).
++        -->
++        <Filter id="rioxxFilter">
++            <Definition>
++                <And>
++                    <LeftCondition>
++                        <Or>
++                            <LeftCondition>
++                                <Custom ref="itemAccessCondition"/>
++                            </LeftCondition>
++                            <RightCondition>
++                                <Custom ref="itemWithdrawnCondition"/>
++                            </RightCondition>
++                        </Or>
++                    </LeftCondition>
++                    <RightCondition>
++                        <And>
++                            <LeftCondition>
++                                <And>
++                                    <LeftCondition>
++                                        <Custom ref="titleExistsCondition"/>
++                                    </LeftCondition>
++                                    <RightCondition>
++                                        <Custom ref="authorExistsCondition"/>
++                                    </RightCondition>
++                                </And>
++                            </LeftCondition>
++                            <RightCondition>
++                                <And>
++                                    <LeftCondition>
++                                        <Custom ref="rioxxLangExistsCondition"/>
++                                    </LeftCondition>
++                                    <RightCondition>
++                                        <Or>
++                                            <LeftCondition>
++                                                <Custom ref="rioxxTypeExistsCondition"/>
++                                            </LeftCondition>
++                                            <RightCondition>
++                                                <Custom ref="isPublicationEntityCondition"/>
++                                            </RightCondition>
++                                        </Or>
++                                    </RightCondition>
++                                </And>
++                            </RightCondition>
++                        </And>
++                    </RightCondition>
++                </And>
++            </Definition>
++
++        </Filter>
++
+         <!-- Default filter for records returned by OAI-PMH.
+              By default, return an Item record:
+                 * If it is publicly accessible
+@@ -410,6 +506,30 @@
+             </Configuration>
+         </CustomCondition>
+ 
++        <!-- Rioxx specific custom conditions -->
++        <CustomCondition id="rioxxTypeExistsCondition">
++            <Class>org.dspace.xoai.filter.DSpaceMetadataExistsFilter</Class>
++            <Configuration>
++                <list name="fields">
++                    <string name="field">dc.type</string>
++                </list>
++            </Configuration>
++        </CustomCondition>
++
++        <CustomCondition id="rioxxLangExistsCondition">
++            <Class>org.dspace.xoai.filter.DSpaceMetadataExistsFilter</Class>
++            <Configuration>
++                <list name="fields">
++                    <string name="field">dc.language.iso</string>
++                </list>
++            </Configuration>
++        </CustomCondition>
++
++        <!-- This condition determines if an item has any files in the bundle ORIGINAL -->
++        <CustomCondition id="itemsWithBitstreamsFilter">
++            <Class>org.dspace.xoai.filter.ItemsWithBitstreamFilter</Class>
++        </CustomCondition>
++
+         <!-- This condition determines if an Item has a "dc.contributor.author" -->
+         <CustomCondition id="authorExistsCondition">
+             <Class>org.dspace.xoai.filter.DSpaceMetadataExistsFilter</Class>
+@@ -457,7 +577,7 @@
+ 
+         <!-- This condition determines if an Item has a "dc.rights" field
+              specifying "open access", which is required for DRIVER
+-             OR "openAccess", which is required by OpenAIRE. -->
++             OR "openAccess", which is required by Openaire. -->
+         <CustomCondition id="driverAccessCondition">
+             <Class>org.dspace.xoai.filter.DSpaceAtLeastOneMetadataFilter</Class>
+             <Configuration>
+@@ -483,7 +603,7 @@
+         </CustomCondition>
+ 
+         <!-- This condition determines if an Item has a "dc.relation" field
+-             which specifies the openAIRE project ID. -->
++             which specifies the openaire project ID. -->
+         <CustomCondition id="openaireRelationCondition">
+             <Class>org.dspace.xoai.filter.DSpaceAtLeastOneMetadataFilter</Class>
+             <Configuration>
+@@ -529,5 +649,10 @@
+             <Name>OpenAIRE</Name>
+             <!-- Just an alias -->
+         </Set>
++        <Set id="rioxxSet">
++            <Spec>rioxx</Spec>
++            <Name>Rioxx set</Name>
++            <!-- Just an alias -->
++        </Set>
+     </Sets>
+ </Configuration>
+diff --git a/dspace/config/entities/rioxx3-relationships.xml b/dspace/config/entities/rioxx3-relationships.xml
+new file mode 100644
+index 0000000000..558f766a5b
+--- /dev/null
++++ b/dspace/config/entities/rioxx3-relationships.xml
+@@ -0,0 +1,92 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE relationships SYSTEM "relationship-types.dtd">
++<!-- Note that these relationships are the same as those for openaire4
++ 	They are used to map to relevant fields within the Rioxx profile. See docs below. -->
++<relationships>
++
++	<!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:creator
++		The relation between a Publication and a Person regarding the authorship -->
++	<type>
++		<leftType>Publication</leftType>
++		<rightType>Person</rightType>
++		<leftwardType>isAuthorOfPublication</leftwardType>
++		<rightwardType>isPublicationOfAuthor</rightwardType>
++		<leftCardinality>
++			<min>0</min>
++		</leftCardinality>
++		<rightCardinality>
++			<min>0</min>
++		</rightCardinality>
++	</type>
++	<!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:creator
++		The relation between a Publication and an Organization regarding the authorship -->
++	<type>
++		<leftType>Publication</leftType>
++		<rightType>OrgUnit</rightType>
++		<leftwardType>isAuthorOfPublication</leftwardType>
++		<rightwardType>isPublicationOfAuthor</rightwardType>
++		<leftCardinality>
++			<min>0</min>
++		</leftCardinality>
++		<rightCardinality>
++			<min>0</min>
++		</rightCardinality>
++	</type>
++	<!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:contributor
++		The relation between a Publication and a Person regarding the contribution -->
++	<type>
++		<leftType>Publication</leftType>
++		<rightType>Person</rightType>
++		<leftwardType>isContributorOfPublication</leftwardType>
++		<rightwardType>isPublicationOfContributor</rightwardType>
++		<leftCardinality>
++			<min>0</min>
++		</leftCardinality>
++		<rightCardinality>
++			<min>0</min>
++		</rightCardinality>
++	</type>
++	<!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:contributor
++		The relation between a Publication and an Organization regarding the contribution -->
++	<type>
++		<leftType>Publication</leftType>
++		<rightType>OrgUnit</rightType>
++		<leftwardType>isContributorOfPublication</leftwardType>
++		<rightwardType>isPublicationOfContributor</rightwardType>
++		<leftCardinality>
++			<min>0</min>
++		</leftCardinality>
++		<rightCardinality>
++			<min>0</min>
++		</rightCardinality>
++	</type>
++	<!--https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:project
++		The relation between a Publication and an Organization regarding the Funder to populate rioxxterms:project -->
++	<type>
++		<leftType>Publication</leftType>
++		<rightType>Project</rightType>
++		<leftwardType>isProjectOfPublication</leftwardType>
++		<rightwardType>isPublicationOfProject</rightwardType>
++		<leftCardinality>
++			<min>0</min>
++		</leftCardinality>
++		<rightCardinality>
++			<min>0</min>
++		</rightCardinality>
++	</type>
++	<!-- https://www.rioxx.net/profiles/v3-0-final/#rioxxterms:grant
++		The relation between a Funded Project and an Organization regarding the Funder to populate rioxxterms:grant -->
++	<type>
++		<leftType>Project</leftType>
++		<rightType>OrgUnit</rightType>
++		<leftwardType>isFundingAgencyOfProject</leftwardType>
++		<rightwardType>isProjectOfFundingAgency</rightwardType>
++		<leftCardinality>
++			<min>0</min>
++		</leftCardinality>
++		<rightCardinality>
++			<min>0</min>
++		</rightCardinality>
++	</type>
++
++</relationships>
+diff --git a/dspace/config/registries/dublin-core-types.xml b/dspace/config/registries/dublin-core-types.xml
+index d0f340f89c..9a4aefb3ff 100644
+--- a/dspace/config/registries/dublin-core-types.xml
++++ b/dspace/config/registries/dublin-core-types.xml
+@@ -265,6 +265,7 @@
+     <schema>dc</schema>
+     <element>identifier</element>
+     <qualifier>doi</qualifier>
++    <scope_note>The doi identifier minted by this repository.</scope_note>
+   </dc-type>
+   
+   <dc-type>
+diff --git a/dspace/config/spring/api/virtual-metadata.xml.openaire4 b/dspace/config/spring/api/virtual-metadata.xml.openaire4
+index bbdae0e759..6eaf333b00 100644
+--- a/dspace/config/spring/api/virtual-metadata.xml.openaire4
++++ b/dspace/config/spring/api/virtual-metadata.xml.openaire4
+@@ -200,14 +200,12 @@
+     <!-- This Related bean defines a relationship type that will be used on a publication (from a project).
+          -->
+     <bean class="org.dspace.content.virtual.Related" id="publicationProject_projectFunderName_related">
+-        <property name="relationshipTypeString" value="isProjectOfFundingAgency"/>
+-        <property name="place" value="1"/>
++        <property name="relationshipTypeString" value="isFundingAgencyOfProject"/>
+         <property name="virtualMetadataConfiguration" ref="projectOrgUnit_orgName"/>
+     </bean>
+ 
+     <bean class="org.dspace.content.virtual.Related" id="publicationProject_projectFunderId_related">
+-        <property name="relationshipTypeString" value="isProjectOfFundingAgency"/>
+-        <property name="place" value="1"/>
++        <property name="relationshipTypeString" value="isFundingAgencyOfProject"/>
+         <property name="virtualMetadataConfiguration" ref="projectOrgUnit_orgId"/>
+     </bean>
+     
+diff --git a/dspace/solr/oai/conf/schema.xml b/dspace/solr/oai/conf/schema.xml
+index b2f61c2de9..aefa798348 100644
+--- a/dspace/solr/oai/conf/schema.xml
++++ b/dspace/solr/oai/conf/schema.xml
+@@ -126,7 +126,9 @@
+    <field name="item.submitter" type="string" indexed="true" stored="true" multiValued="false" />
+    <field name="item.deleted" type="boolean" indexed="true" stored="true" multiValued="false" />
+    <!-- if true, item.public will change in the future due to an embargo being set/lifted -->
+-   <field name="item.willChangeStatus" type="boolean" indexed="true" stored="true" multiValued="false" />																									 
++   <field name="item.willChangeStatus" type="boolean" indexed="true" stored="true" multiValued="false" />
++   <!-- Used in RIOXX OAI context to determine whether an item has files in ORIGINAL Bundle -->
++   <field name="item.hasbitstream" type="boolean" indexed="true" stored="true" multiValued="false" />
+ 
+    <!-- Item compiled -->
+    <field name="item.compile" type="string" indexed="false" stored="true" multiValued="false" />
