@@ -3,7 +3,7 @@
 # Rioxx v3.0 DSpace Integration
 
 The official documentation on how to configure the Rioxx v3.0 endpoint is available at [Lyrasis: Rioxx v3 schema compliance](https://wiki.lyrasis.org/display/DSDOC8x/Rioxx+v3+schema+compliance).
-This repository keeps the patch file to be installed on DSpace 7 (REST backend) to enable/configure the Rioxx v3.0 OAI feature.
+This repository keeps the patch file to be installed on DSpace 7.6.1 (REST backend) to enable/configure the Rioxx v3.0 OAI feature.
 
 
 ## How to install the patch file
